@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FalconAI OSINT Profile XLSX Collector v2
 // @namespace    https://falconai.local/osint
-// @version      2.1.0
+// @version      2.1.1
 // @description  Captura asistida de perfiles, apartados About y exportación XLSX separada por plataforma.
 // @author       FalconAI
 // @match        https://www.tiktok.com/@*
@@ -15,7 +15,7 @@
 // @match        https://threads.com/@*
 // @match        https://www.threads.net/@*
 // @match        https://threads.net/@*
-// @require      https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js
+// @require      https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
@@ -37,6 +37,7 @@
     const AUTO_MAX_SECONDS = 46;
 
     const HEADERS = [
+        'URL',
         'USUARIO',
         'NOMBRE VISIBLE',
         'ID interno',
@@ -49,12 +50,46 @@
         'ÚLTIMA ACTUALIZACIÓN DEL PERFIL',
         'Nº CAMBIOS DE USUARIO',
         'EXISTE',
-        'URL',
         'FECHA DE CAPTURA',
         'OBSERVACIONES',
         'GRUPO PÚBLICO',
         'GRUPO VISIBLE'
     ];
+
+    const PLATFORM_HEADER_LABELS = {
+        Facebook: {
+            'NOMBRE VISIBLE': 'FB: NOMBRE VISIBLE',
+            'ID interno': 'FB: ID interno',
+            'Nº SEGUIDORES': 'FB: AMIGOS/MIEMBROS',
+            'FECHA DE CREACIÓN DE CUENTA': 'FB: FECHA DE CREACIÓN DE CUENTA',
+            'UBICACIÓN DE LA CUENTA': 'FB: UBICACIÓN DE LA CUENTA',
+            'ÚLTIMA ACTUALIZACIÓN DEL PERFIL': 'FB: ÚLTIMA ACTUALIZACIÓN DEL PERFIL',
+            'GRUPO PÚBLICO': 'FB: GRUPO PÚBLICO',
+            'GRUPO VISIBLE': 'FB: GRUPO VISIBLE'
+        },
+        'Twitter/X': {
+            'ID interno': 'X: ID interno',
+            'FECHA DE CREACIÓN DE CUENTA': 'X: FECHA DE CREACIÓN DE CUENTA',
+            'UBICACIÓN DE LA CUENTA': 'X: UBICACIÓN DE LA CUENTA',
+            'ÚLTIMO CAMBIO DE USUARIO': 'X: ÚLTIMO CAMBIO DE USUARIO',
+            'Nº CAMBIOS DE USUARIO': 'X: Nº CAMBIOS DE USUARIO'
+        },
+        Instagram: {
+            'ID interno': 'IG: ID interno',
+            'FECHA DE CREACIÓN DE CUENTA': 'IG: FECHA DE CREACIÓN DE CUENTA',
+            'UBICACIÓN DE LA CUENTA': 'IG: UBICACIÓN DE LA CUENTA',
+            'Nº CAMBIOS DE USUARIO': 'IG: Nº CAMBIOS DE USUARIO'
+        },
+        TikTok: {
+            'ID interno': 'TT: ID interno',
+            'FECHA DE CREACIÓN DE CUENTA': 'TT: FECHA DE CREACIÓN DE CUENTA',
+            'UBICACIÓN DE LA CUENTA': 'TT: UBICACIÓN DE LA CUENTA',
+            'ÚLTIMO CAMBIO DE USUARIO': 'TT: ÚLTIMO CAMBIO DE USUARIO'
+        },
+        Threads: {
+            'ID interno': 'TH: ID interno'
+        }
+    };
 
     const PLATFORM = detectPlatform();
     if (!PLATFORM) return;
@@ -1057,27 +1092,39 @@ https://x.com/usuario3"></textarea>
      ********************************************************************/
 
     function startFacebookNumericIdFallback(fromQueue) {
-        const groupId = location.pathname.match(
-            /^\/groups\/(\d+)\/?$/i
-        )?.[1];
+        const profileId = (() => {
+            try {
+                const url = new URL(location.href);
+                const id = url.searchParams.get('id') || '';
 
-        if (!groupId) return false;
+                return (
+                    url.pathname.startsWith('/profile.php') &&
+                    /^\d{5,}$/.test(id)
+                )
+                    ? id
+                    : '';
+            } catch {
+                return '';
+            }
+        })();
+
+        if (!profileId) return false;
 
         savePending({
             stage: 'facebook-id-fallback',
             platform: PLATFORM,
-            identity: groupId,
+            identity: profileId,
             fromQueue
         });
 
         setStatus(
-            `El ID ${groupId} no corresponde a un grupo accesible.\n` +
-            'Probándolo como perfil de Facebook…'
+            `El ID ${profileId} no corresponde a un perfil accesible.\n` +
+            'Probándolo como grupo de Facebook…'
         );
 
         setTimeout(() => {
             location.href =
-                `https://www.facebook.com/profile.php?id=${encodeURIComponent(groupId)}`;
+                `https://www.facebook.com/groups/${encodeURIComponent(profileId)}`;
         }, 700);
 
         return true;
@@ -1145,9 +1192,10 @@ https://x.com/usuario3"></textarea>
 
         if (type === 'GRUPO') {
             const groupName = extractFacebookGroupName();
+            const groupId = getFacebookGroupIdFromUrl() || getFacebookIdentity();
 
             return {
-                USUARIO: groupName || getFacebookIdentity() || 'N/D',
+                USUARIO: groupId || 'N/D',
                 'NOMBRE VISIBLE': groupName || 'N/D',
                 'ID interno': findFacebookInternalId('GRUPO'),
                 'Nº SEGUIDORES': extractFacebookGroupMembers(body),
@@ -1682,10 +1730,10 @@ https://x.com/usuario3"></textarea>
         if (
             pending.stage === 'facebook-id-fallback' &&
             PLATFORM === 'Facebook' &&
-            location.pathname.startsWith('/profile.php') &&
+            /^\/groups\//i.test(location.pathname) &&
             sameIdentity(
                 pending.identity,
-                new URL(location.href).searchParams.get('id') || ''
+                location.pathname.match(/^\/groups\/([^/?#]+)/i)?.[1] || ''
             )
         ) {
             await waitForPage();
@@ -1707,7 +1755,7 @@ https://x.com/usuario3"></textarea>
                     buildUnavailableRow(
                         identity,
                         'NO',
-                        'El ID no corresponde a un grupo ni a un perfil accesible de Facebook.'
+                        'El ID no corresponde a un perfil ni a un grupo accesible de Facebook.'
                     ),
                     fromQueue
                 );
@@ -2092,6 +2140,34 @@ https://x.com/usuario3"></textarea>
         }) || null;
     }
 
+    function exportHeaders() {
+        return HEADERS.map(exportHeaderLabel);
+    }
+
+    function exportHeaderLabel(header) {
+        return PLATFORM_HEADER_LABELS[PLATFORM]?.[header] || header;
+    }
+
+    function rawField(raw, header, aliases = []) {
+        const candidates = [
+            header,
+            exportHeaderLabel(header),
+            ...aliases
+        ];
+
+        for (const candidate of candidates) {
+            if (
+                raw[candidate] !== undefined &&
+                raw[candidate] !== null &&
+                raw[candidate] !== ''
+            ) {
+                return raw[candidate];
+            }
+        }
+
+        return '';
+    }
+
     function exportXlsx() {
         const rows = getRows();
 
@@ -2121,17 +2197,66 @@ https://x.com/usuario3"></textarea>
             })
             .map(item => item.row);
 
+        const visibleHeaders = exportHeaders();
         const matrix = [
-            HEADERS,
+            visibleHeaders,
             ...sortedRows.map(row => {
                 return HEADERS.map(
-                    header => String(row[header] ?? '')
+                    header => header === 'URL'
+                        ? (
+                            isUsefulValue(row.URL)
+                                ? String(row.URL)
+                                : 'N/D'
+                        )
+                        : String(row[header] ?? '')
                 );
             })
         ];
 
         const worksheet =
             XLSXLib.utils.aoa_to_sheet(matrix);
+
+        sortedRows.forEach((row, index) => {
+            const address = XLSXLib.utils.encode_cell({
+                c: 0,
+                r: index + 1
+            });
+            const target = clean(row.URL);
+
+            if (worksheet[address] && target && !/^N\/D$/i.test(target)) {
+                worksheet[address].l = {
+                    Target: target,
+                    Tooltip: target
+                };
+                worksheet[address].s = {
+                    font: {
+                        color: { rgb: '0563C1' },
+                        underline: true
+                    }
+                };
+            }
+        });
+
+        sortedRows.forEach((row, index) => {
+            if (normalizeText(row.EXISTE) !== 'no') return;
+
+            for (let columnIndex = 0; columnIndex < HEADERS.length; columnIndex += 1) {
+                const address = XLSXLib.utils.encode_cell({
+                    c: columnIndex,
+                    r: index + 1
+                });
+
+                if (!worksheet[address]) continue;
+
+                worksheet[address].s = {
+                    ...(worksheet[address].s || {}),
+                    fill: {
+                        patternType: 'solid',
+                        fgColor: { rgb: 'FCE8E6' }
+                    }
+                };
+            }
+        });
 
         /*
          * Todas las celdas se fuerzan a texto.
@@ -2145,6 +2270,7 @@ https://x.com/usuario3"></textarea>
         }
 
         worksheet['!cols'] = [
+            { wch: 48 },
             { wch: 28 },
             { wch: 34 },
             { wch: 25 },
@@ -2157,7 +2283,6 @@ https://x.com/usuario3"></textarea>
             { wch: 32 },
             { wch: 25 },
             { wch: 12 },
-            { wch: 48 },
             { wch: 26 },
             { wch: 70 },
             { wch: 17 },
@@ -2172,7 +2297,10 @@ https://x.com/usuario3"></textarea>
             'perfiles'
         );
 
-        XLSXLib.writeFile(workbook, XLSX_NAME);
+        XLSXLib.writeFile(workbook, XLSX_NAME, {
+            bookType: 'xlsx',
+            cellStyles: true
+        });
 
         setStatus(
             `Excel exportado:\n${XLSX_NAME}\nFilas: ${rows.length}`
@@ -2271,28 +2399,38 @@ https://x.com/usuario3"></textarea>
         }
 
         row.USUARIO = clean(
-            raw.USUARIO ||
+            rawField(raw, 'USUARIO') ||
             raw.usuario ||
             getUserFromUrl() ||
             'N/D'
         ).replace(/^@/, '');
 
         row['NOMBRE VISIBLE'] = clean(
-            raw['NOMBRE VISIBLE'] ||
+            rawField(raw, 'NOMBRE VISIBLE', [
+                'FB: NOMBRE VISIBLE'
+            ]) ||
             raw.displayName ||
             raw.nombreVisible ||
             'N/D'
         );
 
         row['ID interno'] = clean(
-            raw['ID interno'] ||
+            rawField(raw, 'ID interno', [
+                'FB: ID interno',
+                'X: ID interno',
+                'IG: ID interno',
+                'TT: ID interno',
+                'TH: ID interno'
+            ]) ||
             raw.idInterno ||
             raw.id ||
             'N/D'
         );
 
         row['Nº SEGUIDORES'] = formatAudienceCount(
-            raw['Nº SEGUIDORES'] ||
+            rawField(raw, 'Nº SEGUIDORES', [
+                'FB: AMIGOS/MIEMBROS'
+            ]) ||
             raw.seguidores ||
             raw.amigos ||
             raw.miembros ||
@@ -2300,13 +2438,13 @@ https://x.com/usuario3"></textarea>
         );
 
         row['TIPO DE OBJETO'] = clean(
-            raw['TIPO DE OBJETO'] ||
+            rawField(raw, 'TIPO DE OBJETO') ||
             raw.tipo ||
             'PERFIL'
         ).toUpperCase();
 
         row.MÉTRICA = clean(
-            raw.MÉTRICA ||
+            rawField(raw, 'MÉTRICA') ||
             raw.metrica ||
             'SEGUIDORES'
         ).toUpperCase();
@@ -2315,38 +2453,56 @@ https://x.com/usuario3"></textarea>
 
         row['FECHA DE CREACIÓN DE CUENTA'] =
             normalizeDateField(
-                raw['FECHA DE CREACIÓN DE CUENTA'] ||
+                rawField(raw, 'FECHA DE CREACIÓN DE CUENTA', [
+                    'FB: FECHA DE CREACIÓN DE CUENTA',
+                    'X: FECHA DE CREACIÓN DE CUENTA',
+                    'IG: FECHA DE CREACIÓN DE CUENTA',
+                    'TT: FECHA DE CREACIÓN DE CUENTA'
+                ]) ||
                 raw.fechaCreacion ||
                 'N/D'
             );
 
         row['UBICACIÓN DE LA CUENTA'] = clean(
-            raw['UBICACIÓN DE LA CUENTA'] ||
+            rawField(raw, 'UBICACIÓN DE LA CUENTA', [
+                'FB: UBICACIÓN DE LA CUENTA',
+                'X: UBICACIÓN DE LA CUENTA',
+                'IG: UBICACIÓN DE LA CUENTA',
+                'TT: UBICACIÓN DE LA CUENTA'
+            ]) ||
             raw.ubicacion ||
             'N/D'
         );
 
         row['ÚLTIMO CAMBIO DE USUARIO'] =
             normalizeDateField(
-                raw['ÚLTIMO CAMBIO DE USUARIO'] ||
+                rawField(raw, 'ÚLTIMO CAMBIO DE USUARIO', [
+                    'X: ÚLTIMO CAMBIO DE USUARIO',
+                    'TT: ÚLTIMO CAMBIO DE USUARIO'
+                ]) ||
                 raw.ultimoCambioUsuario ||
                 'N/D'
             );
 
         row['ÚLTIMA ACTUALIZACIÓN DEL PERFIL'] = clean(
-            raw['ÚLTIMA ACTUALIZACIÓN DEL PERFIL'] ||
+            rawField(raw, 'ÚLTIMA ACTUALIZACIÓN DEL PERFIL', [
+                'FB: ÚLTIMA ACTUALIZACIÓN DEL PERFIL'
+            ]) ||
             raw.ultimaActualizacionPerfil ||
             'N/D'
         );
 
         row['Nº CAMBIOS DE USUARIO'] = clean(
-            raw['Nº CAMBIOS DE USUARIO'] ||
+            rawField(raw, 'Nº CAMBIOS DE USUARIO', [
+                'X: Nº CAMBIOS DE USUARIO',
+                'IG: Nº CAMBIOS DE USUARIO'
+            ]) ||
             raw.numeroCambiosUsuario ||
             'N/D'
         );
 
         const existence = clean(
-            raw.EXISTE ||
+            rawField(raw, 'EXISTE') ||
             raw.existe ||
             'SI'
         ).toUpperCase();
@@ -2354,7 +2510,7 @@ https://x.com/usuario3"></textarea>
         row.EXISTE = existence || 'SI';
 
         row.URL = clean(
-            raw.URL ||
+            rawField(raw, 'URL') ||
             canonicalProfileUrl()
         );
 
@@ -2362,19 +2518,23 @@ https://x.com/usuario3"></textarea>
             new Date().toISOString();
 
         row.OBSERVACIONES = clean(
-            raw.OBSERVACIONES ||
+            rawField(raw, 'OBSERVACIONES') ||
             raw.observaciones ||
             ''
         );
 
         row['GRUPO PÚBLICO'] = clean(
-            raw['GRUPO PÚBLICO'] ||
+            rawField(raw, 'GRUPO PÚBLICO', [
+                'FB: GRUPO PÚBLICO'
+            ]) ||
             raw.grupoPublico ||
             'N/D'
         ).toUpperCase();
 
         row['GRUPO VISIBLE'] = clean(
-            raw['GRUPO VISIBLE'] ||
+            rawField(raw, 'GRUPO VISIBLE', [
+                'FB: GRUPO VISIBLE'
+            ]) ||
             raw.grupoVisible ||
             'N/D'
         ).toUpperCase();
@@ -2395,8 +2555,8 @@ https://x.com/usuario3"></textarea>
     function normalizeDateField(value) {
         const cleaned = clean(value);
 
-        if (cleaned === '0') {
-            return '0';
+        if (cleaned === '0' || cleaned === '-') {
+            return cleaned;
         }
 
         if (!cleaned || /^N\/D$/i.test(cleaned)) {
@@ -2426,34 +2586,42 @@ https://x.com/usuario3"></textarea>
         const monthDefinitions = [
             {
                 names: ['enero', 'ene', 'january', 'jan'],
+                number: '01',
                 output: 'Enero'
             },
             {
                 names: ['febrero', 'feb', 'february'],
+                number: '02',
                 output: 'Febrero'
             },
             {
                 names: ['marzo', 'mar', 'march'],
+                number: '03',
                 output: 'Marzo'
             },
             {
                 names: ['abril', 'abr', 'april', 'apr'],
+                number: '04',
                 output: 'Abril'
             },
             {
                 names: ['mayo', 'may'],
+                number: '05',
                 output: 'Mayo'
             },
             {
                 names: ['junio', 'jun', 'june'],
+                number: '06',
                 output: 'Junio'
             },
             {
                 names: ['julio', 'jul', 'july'],
+                number: '07',
                 output: 'Julio'
             },
             {
                 names: ['agosto', 'ago', 'august', 'aug'],
+                number: '08',
                 output: 'Agosto'
             },
             {
@@ -2464,23 +2632,43 @@ https://x.com/usuario3"></textarea>
                     'sep',
                     'september'
                 ],
+                number: '09',
                 output: 'Septiembre'
             },
             {
                 names: ['octubre', 'oct', 'october'],
+                number: '10',
                 output: 'Octubre'
             },
             {
                 names: ['noviembre', 'nov', 'november'],
+                number: '11',
                 output: 'Noviembre'
             },
             {
                 names: ['diciembre', 'dic', 'december', 'dec'],
+                number: '12',
                 output: 'Diciembre'
             }
         ];
 
         for (const month of monthDefinitions) {
+            const monthPattern = month.names
+                .map(escapeRegExp)
+                .join('|');
+            const dayBeforeMonth = normalized.match(
+                new RegExp(
+                    `\\b(0?[1-9]|[12]\\d|3[01])\\s*(?:de\\s+)?(?:${monthPattern})(?:\\s+de)?\\s*,?\\s*${yearMatch[1]}\\b`,
+                    'i'
+                )
+            );
+            const dayAfterMonth = normalized.match(
+                new RegExp(
+                    `\\b(?:${monthPattern})\\s+(0?[1-9]|[12]\\d|3[01])(?:st|nd|rd|th)?\\s*,?\\s*${yearMatch[1]}\\b`,
+                    'i'
+                )
+            );
+
             if (
                 month.names.some(name => {
                     const pattern = new RegExp(
@@ -2491,24 +2679,36 @@ https://x.com/usuario3"></textarea>
                     return pattern.test(normalized);
                 })
             ) {
+                const day = dayBeforeMonth?.[1] || dayAfterMonth?.[1] || '';
+
+                if (day) {
+                    return formatMilitaryDate(day, month.number, yearMatch[1]);
+                }
+
                 return `${month.output} ${yearMatch[1]}`;
             }
         }
 
         const isoMatch = normalized.match(
-            /\b(?:19|20|21)\d{2}[-/](0[1-9]|1[0-2])(?:[-/]\d{1,2})?\b/
+            /\b((?:19|20|21)\d{2})[-/](0[1-9]|1[0-2])(?:[-/](0?[1-9]|[12]\d|3[01]))?\b/
         );
 
         if (isoMatch) {
-            return `${monthNumberToSpanish(isoMatch[1])} ${yearMatch[1]}`;
+            return isoMatch[3]
+                ? formatMilitaryDate(isoMatch[3], isoMatch[2], isoMatch[1])
+                : `${monthNumberToSpanish(isoMatch[2])} ${isoMatch[1]}`;
         }
 
         const europeanMatch = normalized.match(
-            /\b\d{1,2}[-/](0?[1-9]|1[0-2])[-/](?:19|20|21)\d{2}\b/
+            /\b(0?[1-9]|[12]\d|3[01])[-/](0?[1-9]|1[0-2])[-/]((?:19|20|21)\d{2})\b/
         );
 
         if (europeanMatch) {
-            return `${monthNumberToSpanish(europeanMatch[1])} ${yearMatch[1]}`;
+            return formatMilitaryDate(
+                europeanMatch[1],
+                europeanMatch[2],
+                europeanMatch[3]
+            );
         }
 
         return 'N/D';
@@ -2540,7 +2740,11 @@ https://x.com/usuario3"></textarea>
             return 'N/D';
         }
 
-        return `${monthNumberToSpanish(date.getUTCMonth() + 1)} ${date.getUTCFullYear()}`;
+        return formatMilitaryDate(
+            date.getUTCDate(),
+            date.getUTCMonth() + 1,
+            date.getUTCFullYear()
+        );
     }
 
     function formatAudienceCount(value) {
@@ -2630,6 +2834,31 @@ https://x.com/usuario3"></textarea>
         return Number(value.toFixed(2))
             .toString()
             .replace('.', ',');
+    }
+
+    function formatMilitaryDate(day, month, year) {
+        const monthAbbreviations = {
+            '01': 'ENE',
+            '02': 'FEB',
+            '03': 'MAR',
+            '04': 'ABR',
+            '05': 'MAY',
+            '06': 'JUN',
+            '07': 'JUL',
+            '08': 'AGO',
+            '09': 'SEP',
+            '10': 'OCT',
+            '11': 'NOV',
+            '12': 'DIC'
+        };
+        const monthKey = String(month).padStart(2, '0');
+        const monthText = monthAbbreviations[monthKey];
+
+        if (!monthText) {
+            return 'N/D';
+        }
+
+        return `${String(day).padStart(2, '0')}${monthText}${year}`;
     }
 
     function monthNumberToSpanish(number) {
@@ -3091,6 +3320,15 @@ https://x.com/usuario3"></textarea>
             : 'PERFIL';
     }
 
+    function getFacebookGroupIdFromUrl() {
+        try {
+            return new URL(location.href).pathname
+                .match(/^\/groups\/([^/?#]+)/i)?.[1] || '';
+        } catch {
+            return '';
+        }
+    }
+
     function getFacebookIdentity() {
         try {
             const url = new URL(location.href);
@@ -3329,7 +3567,7 @@ https://x.com/usuario3"></textarea>
 
             case 'Facebook':
                 if (/^\d{5,}$/.test(value)) {
-                    return `https://www.facebook.com/groups/${encodeURIComponent(value)}`;
+                    return `https://www.facebook.com/profile.php?id=${encodeURIComponent(value)}`;
                 }
 
                 return `https://www.facebook.com/${encodeURIComponent(value)}`;
@@ -3433,10 +3671,15 @@ https://x.com/usuario3"></textarea>
     }
 
     function buildUnavailableRow(username, exists, observations) {
+        const missingValue = normalizeText(exists) === 'no'
+            ? '-'
+            : 'N/D';
+
         return {
-            USUARIO: username || 'N/D',
-            'ID interno': 'N/D',
-            'Nº SEGUIDORES': 'N/D',
+            USUARIO: username || missingValue,
+            'NOMBRE VISIBLE': missingValue,
+            'ID interno': missingValue,
+            'Nº SEGUIDORES': missingValue,
             'TIPO DE OBJETO':
                 PLATFORM === 'Facebook'
                     ? getFacebookObjectType()
@@ -3449,13 +3692,16 @@ https://x.com/usuario3"></textarea>
                         ? 'AMIGOS'
                         : 'SEGUIDORES',
             PLATAFORMA: PLATFORM,
-            'FECHA DE CREACIÓN DE CUENTA': 'N/D',
-            'UBICACIÓN DE LA CUENTA': 'N/D',
-            'ÚLTIMO CAMBIO DE USUARIO': 'N/D',
-            'Nº CAMBIOS DE USUARIO': 'N/D',
+            'FECHA DE CREACIÓN DE CUENTA': missingValue,
+            'UBICACIÓN DE LA CUENTA': missingValue,
+            'ÚLTIMO CAMBIO DE USUARIO': missingValue,
+            'ÚLTIMA ACTUALIZACIÓN DEL PERFIL': missingValue,
+            'Nº CAMBIOS DE USUARIO': missingValue,
             EXISTE: exists,
             URL: canonicalProfileUrl(),
-            OBSERVACIONES: observations
+            OBSERVACIONES: observations,
+            'GRUPO PÚBLICO': missingValue,
+            'GRUPO VISIBLE': missingValue
         };
     }
 
