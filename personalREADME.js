@@ -2212,16 +2212,7 @@ https://x.com/usuario3"></textarea>
             return;
         }
 
-        const sortedRows = rows
-            .map((row, index) => ({ row, index }))
-            .sort((first, second) => {
-                const rankDifference =
-                    exportRowRank(first.row) -
-                    exportRowRank(second.row);
-
-                return rankDifference || first.index - second.index;
-            })
-            .map(item => item.row);
+        const sortedRows = [...rows];
 
         const visibleHeaders = exportHeaders();
         const matrix = [
@@ -4305,6 +4296,7 @@ https://x.com/usuario3"></textarea>
 
         return (
             cleaned !== '' &&
+            cleaned !== '-' &&
             !/^N\/D$/i.test(cleaned) &&
             !/^undefined$/i.test(cleaned) &&
             !/^null$/i.test(cleaned)
@@ -4347,16 +4339,6 @@ https://x.com/usuario3"></textarea>
             normalizeText(row['TIPO DE OBJETO'] || ''),
             normalizeText(row.USUARIO || '')
         ].join('::');
-    }
-
-    function exportRowRank(row) {
-        if (normalizeText(row.EXISTE) !== 'si') {
-            return 2;
-        }
-
-        return normalizeText(row['TIPO DE OBJETO']) === 'grupo'
-            ? 1
-            : 0;
     }
 
     function setStatus(message) {
