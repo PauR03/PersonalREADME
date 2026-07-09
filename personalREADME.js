@@ -42,6 +42,7 @@
         'NOMBRE VISIBLE',
         'ID interno',
         'Nº SEGUIDORES',
+        'Nº SEGUIDOS',
         'TIPO DE OBJETO',
         'PLATAFORMA',
         'FECHA DE CREACIÓN DE CUENTA',
@@ -61,6 +62,7 @@
             'NOMBRE VISIBLE': 'FB: NOMBRE VISIBLE',
             'ID interno': 'FB: ID interno',
             'Nº SEGUIDORES': 'FB: AMIGOS/MIEMBROS',
+            'Nº SEGUIDOS': 'FB: SEGUIDOS',
             'FECHA DE CREACIÓN DE CUENTA': 'FB: FECHA DE CREACIÓN DE CUENTA',
             'UBICACIÓN DE LA CUENTA': 'FB: UBICACIÓN DE LA CUENTA',
             'ÚLTIMA ACTUALIZACIÓN DEL PERFIL': 'FB: ÚLTIMA ACTUALIZACIÓN DEL PERFIL',
@@ -518,6 +520,7 @@ https://x.com/usuario3"></textarea>
                 /([\d][\d.,\s]*(?:K|M|B|mil|millones)?)\s+(?:Followers|Seguidores)\b/i,
                 /(?:Followers|Seguidores)\s+([\d][\d.,\s]*(?:K|M|B|mil|millones)?)/i
             ]),
+            'Nº SEGUIDOS': extractFollowingMetric(body),
             'TIPO DE OBJETO': 'PERFIL',
             MÉTRICA: 'SEGUIDORES',
             PLATAFORMA: PLATFORM,
@@ -749,10 +752,15 @@ https://x.com/usuario3"></textarea>
                 /([\d][\d.,\s]*(?:K|M|B|mil|millones)?)\s+(?:Followers|seguidores)\b/i
             ]);
 
+        const following =
+            extractFollowingMetric(description) ||
+            extractFollowingMetric(getBodyText());
+
         return {
             USUARIO: username,
             'ID interno': findInstagramInternalId(username),
             'Nº SEGUIDORES': followers || 'N/D',
+            'Nº SEGUIDOS': following || 'N/D',
             'TIPO DE OBJETO': 'PERFIL',
             MÉTRICA: 'SEGUIDORES',
             PLATAFORMA: PLATFORM,
@@ -1199,6 +1207,7 @@ https://x.com/usuario3"></textarea>
                 'NOMBRE VISIBLE': groupName || 'N/D',
                 'ID interno': findFacebookInternalId('GRUPO'),
                 'Nº SEGUIDORES': extractFacebookGroupMembers(body),
+                'Nº SEGUIDOS': 'N/D',
                 'TIPO DE OBJETO': 'GRUPO',
                 MÉTRICA: 'MIEMBROS',
                 PLATAFORMA: PLATFORM,
@@ -1228,6 +1237,7 @@ https://x.com/usuario3"></textarea>
             'NOMBRE VISIBLE': displayName,
             'ID interno': findFacebookInternalId('PERFIL'),
             'Nº SEGUIDORES': extractFacebookFriends(body),
+            'Nº SEGUIDOS': extractFollowingMetric(body),
             'TIPO DE OBJETO': 'PERFIL',
             MÉTRICA: 'AMIGOS',
             PLATAFORMA: PLATFORM,
@@ -1560,6 +1570,16 @@ https://x.com/usuario3"></textarea>
                 /([\d][\d.,\s]*(?:K|M|B|mil|millones)?)\s*(?:Followers|Seguidores)\b/i
             ]);
 
+        const following =
+            pick(stats, [
+                'followingCount',
+                'following_count',
+                'followings',
+                'following'
+            ]) ||
+            text('[data-e2e="following-count"]') ||
+            extractFollowingMetric(getBodyText());
+
         /*
          * Solo se usan campos explícitos de creación si aparecen asociados
          * al objeto de usuario. No se deduce la fecha desde el ID.
@@ -1607,6 +1627,7 @@ https://x.com/usuario3"></textarea>
             USUARIO: username,
             'ID interno': internalId,
             'Nº SEGUIDORES': String(followers || 'N/D'),
+            'Nº SEGUIDOS': String(following || 'N/D'),
             'TIPO DE OBJETO': 'PERFIL',
             MÉTRICA: 'SEGUIDORES',
             PLATAFORMA: PLATFORM,
@@ -1698,10 +1719,15 @@ https://x.com/usuario3"></textarea>
                 /([\d][\d.,\s]*(?:K|M|B|mil|millones)?)\s+(?:followers|seguidores)/i
             ]);
 
+        const following =
+            extractFollowingMetric(description) ||
+            extractFollowingMetric(getBodyText());
+
         return {
             USUARIO: username,
             'ID interno': findThreadsInternalId(username),
             'Nº SEGUIDORES': followers || 'N/D',
+            'Nº SEGUIDOS': following || 'N/D',
             'TIPO DE OBJETO': 'PERFIL',
             MÉTRICA: 'SEGUIDORES',
             PLATAFORMA: PLATFORM,
@@ -2276,6 +2302,7 @@ https://x.com/usuario3"></textarea>
             { wch: 25 },
             { wch: 18 },
             { wch: 18 },
+            { wch: 18 },
             { wch: 15 },
             { wch: 30 },
             { wch: 28 },
@@ -2434,6 +2461,21 @@ https://x.com/usuario3"></textarea>
             raw.seguidores ||
             raw.amigos ||
             raw.miembros ||
+            'N/D'
+        );
+
+        row['Nº SEGUIDOS'] = formatAudienceCount(
+            rawField(raw, 'Nº SEGUIDOS', [
+                'FB: SEGUIDOS',
+                'X: SEGUIDOS',
+                'IG: SEGUIDOS',
+                'TT: SEGUIDOS',
+                'TH: SEGUIDOS'
+            ]) ||
+            raw.seguidos ||
+            raw.siguiendo ||
+            raw.following ||
+            raw.followingCount ||
             'N/D'
         );
 
@@ -2786,11 +2828,11 @@ https://x.com/usuario3"></textarea>
         const absolute = numeric * multiplier;
 
         if (absolute >= 1_000_000) {
-            return `${formatCompactCount(absolute / 1_000_000)}mill`;
+            return `${formatCompactCount(absolute / 1_000_000)} millones`;
         }
 
         if (absolute >= 1_000) {
-            return `${formatCompactCount(absolute / 1_000)}mil`;
+            return `${formatCompactCount(absolute / 1_000)} mil`;
         }
 
         return String(Math.round(absolute));
@@ -3680,6 +3722,7 @@ https://x.com/usuario3"></textarea>
             'NOMBRE VISIBLE': missingValue,
             'ID interno': missingValue,
             'Nº SEGUIDORES': missingValue,
+            'Nº SEGUIDOS': missingValue,
             'TIPO DE OBJETO':
                 PLATFORM === 'Facebook'
                     ? getFacebookObjectType()
@@ -3770,6 +3813,15 @@ https://x.com/usuario3"></textarea>
 
     function extractMetric(source, patterns) {
         return clean(rxFirst(source, patterns)) || 'N/D';
+    }
+
+    function extractFollowingMetric(source) {
+        const value = rxFirst(source, [
+            /(?:^|[,\n\r])\s*([\d][\d.,\s]*(?:K|M|B|mil|millones)?)\s+(?:Following|Siguiendo|Seguidos|Seguidas)\b/i,
+            /(?:Following|Siguiendo|Seguidos|Seguidas)\s*:?\s*([\d][\d.,\s]*(?:K|M|B|mil|millones)?)/i
+        ]);
+
+        return clean(value);
     }
 
     function extractMetricFromLines(source, patterns, exclusions = []) {
