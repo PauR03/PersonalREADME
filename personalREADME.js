@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FalconAI OSINT Profile XLSX Collector v2
 // @namespace    https://falconai.local/osint
-// @version      2.1.1
+// @version      2.1.3
 // @description  Captura asistida de perfiles, apartados About y exportación XLSX separada por plataforma.
 // @author       FalconAI
 // @match        https://www.tiktok.com/@*
@@ -86,7 +86,7 @@
             'ID interno': 'TT: ID interno',
             'FECHA DE CREACIÓN DE CUENTA': 'TT: FECHA DE CREACIÓN DE CUENTA',
             'UBICACIÓN DE LA CUENTA': 'TT: UBICACIÓN DE LA CUENTA',
-            'ÚLTIMO CAMBIO DE USUARIO': 'TT: ÚLTIMO CAMBIO DE USUARIO'
+            'ÚLTIMO CAMBIO DE USUARIO': 'TT: ÚLTIMO CAMBIO DE NICKNAME'
         },
         Threads: {
             'ID interno': 'TH: ID interno'
@@ -386,7 +386,7 @@ https://x.com/usuario3"></textarea>
             switch (PLATFORM) {
                 case 'TikTok':
                     return await commitRow(
-                        extractTikTok(),
+                        await extractTikTok(),
                         fromQueue
                     );
 
@@ -1545,13 +1545,47 @@ https://x.com/usuario3"></textarea>
      * TIKTOK
      ********************************************************************/
 
-    function extractTikTok() {
+    async function extractTikTok() {
         const username =
             getUserFromUrl() ||
             text('[data-e2e="user-title"]') ||
             'N/D';
 
-        const bundle = findTikTokUserBundle(username);
+        let bundle = findTikTokUserBundle(username);
+        const creationKeys = [
+            'createTime',
+            'create_time',
+            'createdAt',
+            'created_at',
+            'accountCreateTime'
+        ];
+        const nicknameChangeKeys = [
+            'nickNameModifyTime',
+            'nicknameModifyTime',
+            'nickname_modify_time',
+            'nick_name_modify_time'
+        ];
+        const pageUser = bundle.user || {};
+        let fetchedProfileHtml = false;
+
+        if (
+            !pick(pageUser, creationKeys) ||
+            !pick(pageUser, nicknameChangeKeys)
+        ) {
+            const fetchedBundle = await fetchTikTokUserBundle(username);
+
+            if (fetchedBundle.user) {
+                bundle = {
+                    user: {
+                        ...pageUser,
+                        ...fetchedBundle.user
+                    },
+                    stats: bundle.stats || fetchedBundle.stats
+                };
+                fetchedProfileHtml = true;
+            }
+        }
+
         const user = bundle.user || {};
         const stats = bundle.stats || {};
 
@@ -1584,31 +1618,21 @@ https://x.com/usuario3"></textarea>
          * Solo se usan campos explícitos de creación si aparecen asociados
          * al objeto de usuario. No se deduce la fecha desde el ID.
          */
-        const creationEpoch = pick(user, [
-            'createTime',
-            'create_time',
-            'createdAt',
-            'created_at',
-            'accountCreateTime'
-        ]);
+        const creationEpoch = pick(user, creationKeys);
 
         /*
-         * No se utiliza nickNameModifyTime porque corresponde al nombre
-         * visible, no necesariamente al username @usuario.
+         * TikTok publica el cambio del nombre visible en
+         * nickNameModifyTime. Es el mismo campo que usa TikTracker para
+         * informar del último cambio de nick; no se sustituye por la fecha
+         * de cambio del identificador @usuario.
          */
-        const usernameChangeEpoch = pick(user, [
-            'uniqueIdModifyTime',
-            'unique_id_modify_time',
-            'usernameModifyTime',
-            'username_modify_time',
-            'handleChangeTime'
-        ]);
+        const nicknameChangeEpoch = pick(user, nicknameChangeKeys);
 
         const creationDate =
             formatEpochMonthYearEs(creationEpoch);
 
-        const usernameChangeDate =
-            formatEpochMonthYearEs(usernameChangeEpoch);
+        const nicknameChangeDate =
+            formatEpochMonthYearEs(nicknameChangeEpoch);
 
         const location =
             pick(user, [
@@ -1621,7 +1645,7 @@ https://x.com/usuario3"></textarea>
 
         const missingRestrictedFields =
             creationDate === 'N/D' ||
-            usernameChangeDate === 'N/D';
+            nicknameChangeDate === 'N/D';
 
         return {
             USUARIO: username,
@@ -1633,18 +1657,216 @@ https://x.com/usuario3"></textarea>
             PLATAFORMA: PLATFORM,
             'FECHA DE CREACIÓN DE CUENTA': creationDate,
             'UBICACIÓN DE LA CUENTA': location,
-            'ÚLTIMO CAMBIO DE USUARIO': usernameChangeDate,
+            'ÚLTIMO CAMBIO DE USUARIO': nicknameChangeDate,
             'Nº CAMBIOS DE USUARIO': 'N/D',
             EXISTE: 'SI',
             URL: canonicalProfileUrl(),
             OBSERVACIONES: missingRestrictedFields
-                ? 'TikTok no ha publicado en esta carga la fecha de creación o el cambio de username. No se han inferido mediante el ID.'
-                : 'Fechas obtenidas de campos explícitos asociados al objeto de usuario.'
+                ? 'TikTok no ha publicado en esta carga la fecha de creación o el cambio de nick. No se han inferido mediante el ID.'
+                : fetchedProfileHtml
+                    ? 'Fecha de creación obtenida de createTime y último cambio del nombre visible obtenido de nickNameModifyTime en el perfil devuelto por TikTok.'
+                    : 'Fecha de creación obtenida de createTime y último cambio del nombre visible obtenido de nickNameModifyTime en el objeto exacto del usuario.'
         };
     }
 
-    function findTikTokUserBundle(username) {
+    async function fetchTikTokUserBundle(username) {
+        if (!username || username === 'N/D') {
+            return { user: null, stats: null };
+        }
+
+        try {
+            const response = await fetch(
+                `https://www.tiktok.com/@${encodeURIComponent(username)}`,
+                {
+                    credentials: 'include',
+                    cache: 'no-store',
+                    headers: {
+                        accept: 'text/html,application/xhtml+xml'
+                    }
+                }
+            );
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            return findTikTokUserBundleInHtml(
+                await response.text(),
+                username
+            );
+        } catch (error) {
+            console.warn(
+                '[FalconAI] No se pudo releer el perfil de TikTok:',
+                error
+            );
+
+            return { user: null, stats: null };
+        }
+    }
+
+    function findTikTokUserBundleInHtml(html, username) {
+        const parsedDocument = new DOMParser().parseFromString(
+            html,
+            'text/html'
+        );
         const roots = [
+            'SIGI_STATE',
+            '__UNIVERSAL_DATA_FOR_REHYDRATION__',
+            '__NEXT_DATA__'
+        ].map(id => {
+            const content = parsedDocument.getElementById(id)?.textContent;
+
+            if (!content) return null;
+
+            try {
+                return JSON.parse(content);
+            } catch {
+                return null;
+            }
+        }).filter(Boolean);
+        const structured = findTikTokUserBundle(username, roots);
+        const rawUser = findTikTokUserObjectInHtml(html, username);
+
+        return {
+            user: structured.user || rawUser
+                ? {
+                    ...(structured.user || {}),
+                    ...(rawUser || {})
+                }
+                : null,
+            stats: structured.stats
+        };
+    }
+
+    function findTikTokUserObjectInHtml(html, username) {
+        const usernameJson = JSON.stringify(String(username));
+        const marker = new RegExp(
+            `"uniqueId"\\s*:\\s*${escapeRegExp(usernameJson)}`,
+            'g'
+        );
+        let match;
+
+        while ((match = marker.exec(html))) {
+            const scriptStart = html.lastIndexOf('<script', match.index);
+            const contentStart = scriptStart >= 0
+                ? html.indexOf('>', scriptStart) + 1
+                : -1;
+            const contentEnd = contentStart > 0
+                ? html.indexOf('</script>', match.index)
+                : -1;
+
+            if (contentStart <= 0 || contentEnd <= match.index) {
+                continue;
+            }
+
+            const scriptText = html.slice(contentStart, contentEnd);
+            const markerIndex = match.index - contentStart;
+            const openings = findOpenJsonObjects(scriptText, markerIndex);
+
+            for (let index = openings.length - 1; index >= 0; index -= 1) {
+                const object = parseJsonObjectAt(
+                    scriptText,
+                    openings[index]
+                );
+                const objectUsername = clean(
+                    object?.uniqueId ||
+                    object?.unique_id ||
+                    object?.username ||
+                    ''
+                );
+
+                if (
+                    objectUsername &&
+                    objectUsername.toLowerCase() === username.toLowerCase()
+                ) {
+                    return object;
+                }
+            }
+
+            /*
+             * Si el objeto exacto no se puede reconstruir, no se buscan
+             * timestamps en un bloque amplio: podría contener otros
+             * usuarios y atribuirles una fecha incorrecta.
+             */
+        }
+
+        return null;
+    }
+
+    function findOpenJsonObjects(source, endIndex) {
+        const stack = [];
+        let inString = false;
+        let escaped = false;
+
+        for (let index = 0; index < endIndex; index += 1) {
+            const character = source[index];
+
+            if (inString) {
+                if (escaped) {
+                    escaped = false;
+                } else if (character === '\\') {
+                    escaped = true;
+                } else if (character === '"') {
+                    inString = false;
+                }
+
+                continue;
+            }
+
+            if (character === '"') {
+                inString = true;
+            } else if (character === '{') {
+                stack.push(index);
+            } else if (character === '}') {
+                stack.pop();
+            }
+        }
+
+        return stack;
+    }
+
+    function parseJsonObjectAt(source, startIndex) {
+        let depth = 0;
+        let inString = false;
+        let escaped = false;
+
+        for (let index = startIndex; index < source.length; index += 1) {
+            const character = source[index];
+
+            if (inString) {
+                if (escaped) {
+                    escaped = false;
+                } else if (character === '\\') {
+                    escaped = true;
+                } else if (character === '"') {
+                    inString = false;
+                }
+
+                continue;
+            }
+
+            if (character === '"') {
+                inString = true;
+            } else if (character === '{') {
+                depth += 1;
+            } else if (character === '}') {
+                depth -= 1;
+
+                if (depth === 0) {
+                    try {
+                        return JSON.parse(source.slice(startIndex, index + 1));
+                    } catch {
+                        return null;
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    function findTikTokUserBundle(username, suppliedRoots = null) {
+        const roots = suppliedRoots || [
             parseJsonScript('SIGI_STATE'),
             parseJsonScript('__UNIVERSAL_DATA_FOR_REHYDRATION__'),
             parseJsonScript('__NEXT_DATA__')
@@ -2511,7 +2733,8 @@ https://x.com/usuario3"></textarea>
             normalizeDateField(
                 rawField(raw, 'ÚLTIMO CAMBIO DE USUARIO', [
                     'X: ÚLTIMO CAMBIO DE USUARIO',
-                    'TT: ÚLTIMO CAMBIO DE USUARIO'
+                    'TT: ÚLTIMO CAMBIO DE USUARIO',
+                    'TT: ÚLTIMO CAMBIO DE NICKNAME'
                 ]) ||
                 raw.ultimoCambioUsuario ||
                 'N/D'
@@ -2607,6 +2830,17 @@ https://x.com/usuario3"></textarea>
         }
 
         const normalized = normalizeText(value);
+        const militaryMatch = normalized.match(
+            /^(0[1-9]|[12]\d|3[01])(ene|feb|mar|abr|may|jun|jul|ago|sep|oct|nov|dic)((?:19|20|21)\d{2})$/i
+        );
+
+        if (militaryMatch) {
+            return (
+                militaryMatch[1] +
+                militaryMatch[2].toUpperCase() +
+                militaryMatch[3]
+            );
+        }
 
         const yearMatch = normalized.match(
             /\b(19\d{2}|20\d{2}|21\d{2})\b/
