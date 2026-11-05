@@ -1,8 +1,8 @@
-// ==UserScript==
+﻿// ==UserScript==
 // @name         Roomba Scraper OSINT Profile XLSX Collector v2
 // @namespace    https://falconai.local/osint
-// @version      2.2.2
-// @description  Captura asistida de perfiles, apartados About y exportación XLSX separada por plataforma.
+// @version      2.6.0
+// @description  Captura OSINT perfiles XLSX. Nombre LISTADO_CUENTAS_FRAUDULENTAS_CSMR_PLATAFORMA_DD-MM-YYYY. Correcciones FB (Seguidos, ID Comet/Page, Fecha creación en modal y transparencia, sin columna ubicación) y TikTok (Detección real de existencia y ubicación por vídeo/embed).
 // @author       Roomba Scraper
 // @match        https://www.tiktok.com/@*
 // @match        https://x.com/*
@@ -23,18 +23,23 @@
 // @run-at       document-idle
 // ==/UserScript==
 
+
 (() => {
     'use strict';
+
 
     /********************************************************************
      * CONFIGURACIÓN
      ********************************************************************/
 
+
     const RECORD_MODE = 'upsert';
+
 
     // Pausa entre perfiles de una cola automática.
     const AUTO_MIN_SECONDS = 12;
     const AUTO_MAX_SECONDS = 46;
+
 
     const HEADERS = [
         'URL',
@@ -57,6 +62,29 @@
         'GRUPO VISIBLE'
     ];
 
+
+    const COLUMN_WIDTHS = {
+        'URL': 48,
+        'Motivación del perfil': 36,
+        'USUARIO': 28,
+        'NOMBRE VISIBLE': 34,
+        'ID interno': 25,
+        'Nº SEGUIDORES': 18,
+        'Nº SEGUIDOS': 18,
+        'TIPO DE OBJETO': 18,
+        'PLATAFORMA': 15,
+        'FECHA DE CREACIÓN DE CUENTA': 30,
+        'UBICACIÓN DE LA CUENTA': 28,
+        'ÚLTIMO CAMBIO DE USUARIO': 28,
+        'ÚLTIMA ACTUALIZACIÓN DEL PERFIL': 32,
+        'Nº CAMBIOS DE USUARIO': 25,
+        'EXISTE': 12,
+        'OBSERVACIONES': 70,
+        'GRUPO PÚBLICO': 17,
+        'GRUPO VISIBLE': 17
+    };
+
+
     const PLATFORM_HEADER_LABELS = {
         Facebook: {
             'NOMBRE VISIBLE': 'FB: NOMBRE VISIBLE',
@@ -64,7 +92,6 @@
             'Nº SEGUIDORES': 'FB: AMIGOS/MIEMBROS',
             'Nº SEGUIDOS': 'FB: SEGUIDOS',
             'FECHA DE CREACIÓN DE CUENTA': 'FB: FECHA DE CREACIÓN DE CUENTA',
-            'UBICACIÓN DE LA CUENTA': 'FB: UBICACIÓN DE LA CUENTA',
             'ÚLTIMA ACTUALIZACIÓN DEL PERFIL': 'FB: ÚLTIMA ACTUALIZACIÓN DEL PERFIL',
             'GRUPO PÚBLICO': 'FB: GRUPO PÚBLICO',
             'GRUPO VISIBLE': 'FB: GRUPO VISIBLE'
@@ -93,27 +120,59 @@
         }
     };
 
+
     const PLATFORM = detectPlatform();
     if (!PLATFORM) return;
+
 
     const SAFE_PLATFORM = PLATFORM
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, '_');
 
+
     const DATA_KEY = `falconai_${SAFE_PLATFORM}_rows_v2`;
     const QUEUE_KEY = `falconai_${SAFE_PLATFORM}_queue_v2`;
     const PENDING_KEY = `falconai_${SAFE_PLATFORM}_pending_v2`;
-    const XLSX_NAME = `roomba_scraper_${SAFE_PLATFORM}_perfiles.xlsx`;
 
-    // Elimina cualquier diagnóstico guardado por versiones anteriores.
+
+    const PLATFORM_FILE_NAMES = {
+        'TikTok':    'TIKTOK',
+        'Twitter/X': 'TWITTER',
+        'Facebook':  'FACEBOOK',
+        'Instagram': 'INSTAGRAM',
+        'Threads':   'THREADS'
+    };
+
+
+    function getPlatformHeaders(platform = PLATFORM) {
+        if (platform === 'Facebook') {
+            return HEADERS.filter(header => header !== 'UBICACIÓN DE LA CUENTA');
+        }
+        return [...HEADERS];
+    }
+
+
+    function buildXlsxName() {
+        const now = new Date();
+        const dd   = String(now.getDate()).padStart(2, '0');
+        const mm   = String(now.getMonth() + 1).padStart(2, '0');
+        const yyyy = now.getFullYear();
+        const platformLabel = PLATFORM_FILE_NAMES[PLATFORM] || SAFE_PLATFORM.toUpperCase();
+        return `LISTADO_CUENTAS_FRAUDULENTAS_CSMR_${platformLabel}_${dd}-${mm}-${yyyy}.xlsx`;
+    }
+
+
     GM_deleteValue(`falconai_${SAFE_PLATFORM}_debug_v2`);
+
 
     let captureRunning = false;
     let instagramAboutFailure = '';
 
+
     /********************************************************************
      * ESTILOS
      ********************************************************************/
+
 
     GM_addStyle(`
         #falconai-panel {
@@ -134,11 +193,13 @@
             padding: 12px;
         }
 
+
         #falconai-panel h3 {
             margin: 0 0 8px;
             font-size: 14px;
             color: #7dd3fc;
         }
+
 
         #falconai-panel button {
             margin: 3px 2px;
@@ -151,17 +212,21 @@
             font-size: 12px;
         }
 
+
         #falconai-panel button.secondary {
             background: #475569;
         }
+
 
         #falconai-panel button.warn {
             background: #b45309;
         }
 
+
         #falconai-panel button.danger {
             background: #991b1b;
         }
+
 
         #falconai-panel textarea {
             width: 100%;
@@ -176,12 +241,14 @@
             resize: vertical;
         }
 
+
         #falconai-status {
             margin-top: 8px;
             color: #cbd5e1;
             line-height: 1.4;
             white-space: pre-wrap;
         }
+
 
         #falconai-small {
             color: #94a3b8;
@@ -191,44 +258,55 @@
         }
     `);
 
+
     /********************************************************************
      * INICIO
      ********************************************************************/
+
 
     boot().catch(error => {
         console.error('[Roomba Scraper] Error de inicio:', error);
     });
 
+
     async function boot() {
         renderPanel();
         await sleep(1800);
 
+
         const resumed = await resumePendingCapture();
+
 
         if (!resumed) {
             setTimeout(runAutoQueueSafely, 1000);
         }
     }
 
+
     /********************************************************************
      * PANEL
      ********************************************************************/
+
 
     function renderPanel() {
         if (document.getElementById('falconai-panel')) return;
         if (!document.body) return;
 
+
         const panel = document.createElement('div');
         panel.id = 'falconai-panel';
 
+
         panel.innerHTML = `
             <h3>🧹 Roomba Scraper · ${escapeHtml(PLATFORM)}</h3>
+
 
             <div>
                 <button id="falconai-capture">Capturar perfil</button>
                 <button id="falconai-export">Exportar XLSX</button>
                 <button id="falconai-import" class="secondary">Importar XLSX</button>
             </div>
+
 
             <div>
                 <button id="falconai-save-queue" class="secondary">Guardar cola</button>
@@ -237,12 +315,15 @@
                 <button id="falconai-clear" class="danger">Borrar datos</button>
             </div>
 
+
             <textarea id="falconai-queue-input"
                 placeholder="Pega usuarios o URLs, uno por línea.
+
 
 usuario1
 @usuario2
 https://x.com/usuario3"></textarea>
+
 
             <input
                 id="falconai-file"
@@ -251,63 +332,75 @@ https://x.com/usuario3"></textarea>
                 style="display:none"
             >
 
+
             <div id="falconai-status">
                 Listo. Plataforma detectada: ${escapeHtml(PLATFORM)}
             </div>
 
+
             <div id="falconai-small"></div>
         `;
 
+
         document.body.appendChild(panel);
+
 
         $('#falconai-capture').addEventListener('click', async () => {
             await captureCurrentProfile(false);
         });
 
+
         $('#falconai-export').addEventListener('click', exportXlsx);
+
 
         $('#falconai-import').addEventListener('click', () => {
             $('#falconai-file').click();
         });
 
+
         $('#falconai-file').addEventListener('change', async event => {
             const file = event.target.files?.[0];
+
 
             if (file) {
                 await importXlsx(file);
             }
 
+
             event.target.value = '';
         });
+
 
         $('#falconai-save-queue').addEventListener(
             'click',
             saveQueueFromTextarea
         );
 
+
         $('#falconai-start-queue').addEventListener('click', () => {
-            /*
-             * Cada inicio reconstruye la cola desde el textarea actual.
-             * Así no se reutiliza una lista antigua guardada en Violentmonkey.
-             */
             saveQueueFromTextarea(false);
             const queue = getQueue();
+
 
             if (!queue.items.length) {
                 setStatus('La cola está vacía.');
                 return;
             }
 
+
             queue.active = true;
+
 
             if (queue.index >= queue.items.length) {
                 queue.index = 0;
             }
 
+
             saveQueue(queue);
             setStatus(`Cola iniciada. Perfiles: ${queue.items.length}`);
             runAutoQueueSafely();
         });
+
 
         $('#falconai-pause-queue').addEventListener('click', () => {
             const queue = getQueue();
@@ -317,29 +410,36 @@ https://x.com/usuario3"></textarea>
             updatePanelCounts();
         });
 
+
         $('#falconai-clear').addEventListener('click', () => {
             const confirmed = confirm(
                 `¿Borrar los datos locales de ${PLATFORM}?`
             );
 
+
             if (!confirmed) return;
+
 
             GM_deleteValue(DATA_KEY);
             GM_deleteValue(QUEUE_KEY);
             GM_deleteValue(PENDING_KEY);
+
 
             setStatus('Datos locales, cola y captura pendiente borrados.');
             refreshQueueTextarea();
             updatePanelCounts();
         });
 
+
         refreshQueueTextarea();
         updatePanelCounts();
     }
 
+
     /********************************************************************
      * CONTROL DE CAPTURA
      ********************************************************************/
+
 
     async function captureCurrentProfile(fromQueue = false) {
         if (captureRunning) {
@@ -347,13 +447,17 @@ https://x.com/usuario3"></textarea>
             return null;
         }
 
+
         captureRunning = true;
+
 
         try {
             await waitForPage();
 
+
             if (detectBlock()) {
                 pauseQueue();
+
 
                 return await commitRow(
                     buildUnavailableRow(
@@ -365,6 +469,7 @@ https://x.com/usuario3"></textarea>
                 );
             }
 
+
             if (detectNotFound()) {
                 if (
                     PLATFORM === 'Facebook' &&
@@ -372,6 +477,7 @@ https://x.com/usuario3"></textarea>
                 ) {
                     return null;
                 }
+
 
                 return await commitRow(
                     buildUnavailableRow(
@@ -383,6 +489,7 @@ https://x.com/usuario3"></textarea>
                 );
             }
 
+
             switch (PLATFORM) {
                 case 'TikTok':
                     return await commitRow(
@@ -390,14 +497,18 @@ https://x.com/usuario3"></textarea>
                         fromQueue
                     );
 
+
                 case 'Twitter/X':
                     return await captureXFlow(fromQueue);
+
 
                 case 'Instagram':
                     return await captureInstagramFlow(fromQueue);
 
+
                 case 'Facebook':
                     return await captureFacebookFlow(fromQueue);
+
 
                 case 'Threads':
                     return await commitRow(
@@ -405,15 +516,18 @@ https://x.com/usuario3"></textarea>
                         fromQueue
                     );
 
+
                 default:
                     return null;
             }
         } catch (error) {
             console.error('[Roomba Scraper] Error de captura:', error);
 
+
             if (fromQueue) {
                 pauseQueue();
             }
+
 
             if (PLATFORM === 'Instagram') {
                 const failedRow = extractInstagramBase();
@@ -422,18 +536,22 @@ https://x.com/usuario3"></textarea>
                     `Error durante el flujo de Instagram: ${error.message || error}`
                 );
 
+
                 return await commitRow(failedRow, fromQueue);
             }
+
 
             setStatus(
                 `Error capturando el perfil:\n${error.message || error}`
             );
+
 
             return null;
         } finally {
             captureRunning = false;
         }
     }
+
 
     async function commitRow(rawData, fromQueue) {
         const replaceFields = Array.isArray(rawData?.__replaceFields)
@@ -442,30 +560,37 @@ https://x.com/usuario3"></textarea>
         const row = normalizeRow(rawData);
         const result = upsertOrAppend(row, replaceFields);
 
+
         setStatus(
             `${result.action}. Filas guardadas: ${result.total}\n` +
             `Usuario: ${row.USUARIO}\n` +
+            `ID: ${row['ID interno']}\n` +
             `Tipo: ${row['TIPO DE OBJETO']}\n` +
-            `Métrica: ${row.MÉTRICA}\n` +
-            `Valor: ${row['Nº SEGUIDORES']}\n` +
-            `Existe: ${row.EXISTE}`
+            `Seguidores/Amigos: ${row['Nº SEGUIDORES']} | Seguidos: ${row['Nº SEGUIDOS']}\n` +
+            `Creación: ${row['FECHA DE CREACIÓN DE CUENTA']} | Existe: ${row.EXISTE}`
         );
 
+
         updatePanelCounts();
+
 
         if (fromQueue) {
             await advanceQueueAfterCommit(row);
         }
 
+
         return row;
     }
+
 
     /********************************************************************
      * CAPTURA EN DOS FASES: X
      ********************************************************************/
 
+
     async function captureXFlow(fromQueue) {
         const username = getUserFromUrl();
+
 
         if (!username) {
             return commitRow(
@@ -478,9 +603,11 @@ https://x.com/usuario3"></textarea>
             );
         }
 
+
         const existing = findExistingRow(username, 'PERFIL');
         const currentData = extractXPage();
         const combinedBase = mergeRows(existing, currentData);
+
 
         if (!isXAboutPage()) {
             savePending({
@@ -491,17 +618,21 @@ https://x.com/usuario3"></textarea>
                 base: combinedBase
             });
 
+
             setStatus(
                 `Perfil base capturado.\n` +
                 `Abriendo la información principal de:\n` +
                 `https://x.com/${username}/about`
             );
 
+
             location.href = `https://x.com/${encodeURIComponent(username)}/about`;
             return null;
         }
 
+
         const aboutData = await extractXAboutPageWithHistory();
+
 
         return commitRow(
             mergeXAboutData(combinedBase, aboutData),
@@ -509,9 +640,11 @@ https://x.com/usuario3"></textarea>
         );
     }
 
+
     function extractXPage() {
         const username = getUserFromUrl() || 'N/D';
         const body = getBodyText();
+
 
         return {
             USUARIO: username,
@@ -535,11 +668,14 @@ https://x.com/usuario3"></textarea>
         };
     }
 
+
     function extractXAboutPage() {
         const username = getUserFromUrl() || 'N/D';
         const body = getBodyText();
 
+
         const joined = extractXJoinedDate(body);
+
 
         let accountLocation = rxFirst(body, [
             /Account based in\s*:?\s*([^\n]{2,100})/i,
@@ -549,6 +685,7 @@ https://x.com/usuario3"></textarea>
             /La cuenta está ubicada en\s*:?\s*([^\n]{2,100})/i,
             /País o región de la cuenta\s*:?\s*([^\n]{2,100})/i
         ]);
+
 
         if (!accountLocation) {
             accountLocation = extractLabeledValue(body, [
@@ -561,10 +698,12 @@ https://x.com/usuario3"></textarea>
             ]);
         }
 
+
         let connectedVia = rxFirst(body, [
             /Connected via\s*:?\s*([^\n]{2,120})/i,
             /Conectado vía\s*:?\s*([^\n]{2,120})/i
         ]);
+
 
         if (!connectedVia) {
             connectedVia = extractLabeledValue(body, [
@@ -572,6 +711,7 @@ https://x.com/usuario3"></textarea>
                 /Conectado vía/i
             ]);
         }
+
 
         return {
             USUARIO: username,
@@ -594,12 +734,15 @@ https://x.com/usuario3"></textarea>
         };
     }
 
+
     async function extractXAboutPageWithHistory() {
         const aboutData = extractXAboutPage();
         const historyData = await openAndReadXUsernameHistory();
 
+
         return mergeRows(aboutData, historyData);
     }
+
 
     async function openAndReadXUsernameHistory() {
         const labels = [
@@ -610,27 +753,35 @@ https://x.com/usuario3"></textarea>
             'Cambios de nombre de usuario'
         ];
 
+
         let history = parseXUsernameHistory(getBodyText());
         const historyEntry = findClickableByText(labels);
+
 
         if (historyEntry) {
             safeClick(historyEntry);
 
+
             await waitFor(() => {
                 const content = normalizeText(getBodyText());
+
 
                 return /last changed|most recent change|ultimo cambio|cambio mas reciente|no former usernames|ningun nombre de usuario anterior|username changes|cambios de nombre de usuario/.test(content);
             }, 6000, 250);
 
+
             history = parseXUsernameHistory(getBodyText());
         }
+
 
         return history;
     }
 
+
     function parseXUsernameHistory(source) {
         const content = String(source || '');
         const normalized = normalizeText(content);
+
 
         let changeCount = rxFirst(content, [
             /(?:Username changes?|Former usernames?)\s*:?\s*(\d{1,5})/i,
@@ -643,17 +794,21 @@ https://x.com/usuario3"></textarea>
             /(\d{1,5})\s+(?:cambios? de nombre de usuario|nombres? de usuario anteriores?)/i
         ]);
 
+
         const noPreviousUsername =
             /no former usernames|no username changes|has never changed (?:their|its) username|ningun nombre de usuario anterior|sin nombres de usuario anteriores|no hay informacion anterior sobre el nombre de usuario|nunca ha cambiado (?:su|el) nombre de usuario/.test(normalized);
+
 
         if (!changeCount && noPreviousUsername) {
             changeCount = '0';
         }
 
+
         let lastChangeRaw = rxFirst(content, [
             /(?:Last changed|Most recent change)\s*:?\s*([^\n]{3,80})/i,
             /(?:Último cambio|Cambio más reciente|Nombre de usuario cambiado el)\s*:?\s*([^\n]{3,80})/i
         ]);
+
 
         if (!lastChangeRaw) {
             lastChangeRaw = extractLabeledValue(content, [
@@ -665,15 +820,18 @@ https://x.com/usuario3"></textarea>
             ]);
         }
 
+
         const lastChange = changeCount === '0'
             ? '0'
             : formatMonthYearEs(lastChangeRaw);
+
 
         return {
             'ÚLTIMO CAMBIO DE USUARIO': lastChange,
             'Nº CAMBIOS DE USUARIO': changeCount || 'N/D'
         };
     }
+
 
     function mergeXAboutData(base, about) {
         const replaceFields = [
@@ -683,15 +841,19 @@ https://x.com/usuario3"></textarea>
             'Nº CAMBIOS DE USUARIO'
         ];
 
+
         const merged = mergeRows(base, about);
+
 
         for (const field of replaceFields) {
             merged[field] = about[field] || 'N/D';
         }
 
+
         merged.__replaceFields = replaceFields;
         return merged;
     }
+
 
     function extractXJoinedDate(body) {
         const raw = rxFirst(body, [
@@ -703,21 +865,27 @@ https://x.com/usuario3"></textarea>
             /Fecha de incorporación\s*:?\s*([^\n]{3,60})/i
         ]);
 
+
         return formatMonthYearEs(raw);
     }
+
 
     /********************************************************************
      * INSTAGRAM: POP-UP "ACERCA DE ESTA CUENTA"
      ********************************************************************/
 
+
     async function captureInstagramFlow(fromQueue) {
         const base = extractInstagramBase();
+
 
         setStatus(
             'Buscando y abriendo “Acerca de esta cuenta”…'
         );
 
+
         const about = await openAndReadInstagramAbout();
+
 
         if (!about) {
             base.OBSERVACIONES = joinNotes(
@@ -726,8 +894,10 @@ https://x.com/usuario3"></textarea>
                     'No se pudo abrir “Acerca de esta cuenta”. Puede no estar disponible para ese perfil, sesión o versión de interfaz.'
             );
 
+
             return commitRow(base, fromQueue);
         }
+
 
         return commitRow(
             mergeRows(base, about),
@@ -735,13 +905,16 @@ https://x.com/usuario3"></textarea>
         );
     }
 
+
     function extractInstagramBase() {
         const username = getUserFromUrl() || 'N/D';
+
 
         const description =
             metaContent('meta[property="og:description"]') ||
             metaContent('meta[name="description"]') ||
             '';
+
 
         const followers =
             rxFirst(description, [
@@ -752,9 +925,11 @@ https://x.com/usuario3"></textarea>
                 /([\d][\d.,\s]*(?:K|M|B|mil|millones)?)\s+(?:Followers|seguidores)\b/i
             ]);
 
+
         const following =
             extractFollowingMetric(description) ||
             extractFollowingMetric(getBodyText());
+
 
         return {
             USUARIO: username,
@@ -775,26 +950,27 @@ https://x.com/usuario3"></textarea>
         };
     }
 
+
     async function openAndReadInstagramAbout() {
         instagramAboutFailure = '';
         let dialog = findInstagramAboutDialog();
+
 
         if (dialog) {
             return parseInstagramAboutDialog(dialog);
         }
 
-        /*
-         * Instagram abre esta información desde el menú de tres puntos.
-         * No se intenta tratarla como un enlace independiente.
-         */
+
         const optionsButton = await waitForDom(
             findInstagramOptionsButton,
             10000
         );
 
+
         const optionsClicked = optionsButton
             ? safeClick(optionsButton)
             : false;
+
 
         if (!optionsButton || !optionsClicked) {
             instagramAboutFailure =
@@ -802,20 +978,24 @@ https://x.com/usuario3"></textarea>
             return null;
         }
 
+
         const menuItem = await waitForDom(
             findInstagramAboutMenuItem,
             8000
         );
 
+
         const menuItemClicked = menuItem
             ? safeClick(menuItem)
             : false;
+
 
         if (!menuItem || !menuItemClicked) {
             instagramAboutFailure =
                 'Instagram: el menú se abrió, pero no se encontró o no se pudo activar “Información sobre esta cuenta”.';
             return null;
         }
+
 
         dialog = await waitForDom(
             findInstagramAboutDialog,
@@ -829,8 +1009,10 @@ https://x.com/usuario3"></textarea>
             return null;
         }
 
+
         return parseInstagramAboutDialog(dialog);
     }
+
 
     function findInstagramOptionsButton() {
         const labels = [
@@ -841,6 +1023,7 @@ https://x.com/usuario3"></textarea>
             'mas opciones'
         ];
 
+
         const scopes = [
             document.querySelector('main header'),
             document.querySelector('header'),
@@ -848,10 +1031,12 @@ https://x.com/usuario3"></textarea>
             document
         ].filter(Boolean);
 
+
         for (const scope of scopes) {
             const popupButtons = Array.from(scope.querySelectorAll(
                 '[role="button"][aria-haspopup="dialog"]'
             ));
+
 
             for (const button of popupButtons) {
                 const accessibleText = normalizeText([
@@ -861,6 +1046,7 @@ https://x.com/usuario3"></textarea>
                         ?.getAttribute('aria-label') || '',
                     button.querySelector('title')?.textContent || ''
                 ].join(' '));
+
 
                 if (
                     labels.some(label => {
@@ -874,9 +1060,11 @@ https://x.com/usuario3"></textarea>
                 }
             }
 
+
             const elements = Array.from(scope.querySelectorAll(
                 '[aria-label],[title]'
             ));
+
 
             for (const element of elements) {
                 const aria = normalizeText(
@@ -885,9 +1073,11 @@ https://x.com/usuario3"></textarea>
                     ''
                 );
 
+
                 if (!labels.some(label => aria === normalizeText(label))) {
                     continue;
                 }
+
 
                 const clickable =
                     element.closest(
@@ -895,14 +1085,17 @@ https://x.com/usuario3"></textarea>
                     ) ||
                     element;
 
+
                 if (isVisible(clickable)) {
                     return clickable;
                 }
             }
         }
 
+
         return null;
     }
+
 
     function findInstagramAboutMenuItem() {
         const labels = [
@@ -911,20 +1104,25 @@ https://x.com/usuario3"></textarea>
             'Información sobre esta cuenta'
         ].map(normalizeText);
 
+
         const textElements = Array.from(document.querySelectorAll(
             'span,div[role="button"],[role="menuitem"]'
         ));
+
 
         for (const element of textElements) {
             if (normalizeText(element.textContent || '') === '') {
                 continue;
             }
 
+
             const clickable = element.closest(
                 '[role="button"],[role="menuitem"],button'
             );
 
+
             if (!clickable || !isVisible(clickable)) continue;
+
 
             const value = normalizeText(
                 clickable.innerText ||
@@ -932,13 +1130,16 @@ https://x.com/usuario3"></textarea>
                 ''
             );
 
+
             if (labels.includes(value)) {
                 return clickable;
             }
         }
 
+
         return null;
     }
+
 
     function findInstagramAboutDialog() {
         const dialogs = Array.from(
@@ -947,10 +1148,12 @@ https://x.com/usuario3"></textarea>
             )
         ).reverse();
 
+
         for (const dialog of dialogs) {
             const content = normalizeText(
                 dialog.innerText || dialog.textContent || ''
             );
+
 
             if (
                 /date joined|fecha de registro|fecha en que se unio|fecha en la que te uniste|se unio a instagram|account based in|cuenta basada en|ubicacion de la cuenta|pais donde se encuentra la cuenta|former username|nombres de usuario anteriores/.test(content)
@@ -959,14 +1162,17 @@ https://x.com/usuario3"></textarea>
             }
         }
 
+
         return null;
     }
+
 
     function parseInstagramAboutDialog(dialog) {
         const content =
             dialog.innerText ||
             dialog.textContent ||
             '';
+
 
         let dateRaw = extractInstagramDialogValue(dialog, [
             'Date joined',
@@ -975,6 +1181,7 @@ https://x.com/usuario3"></textarea>
             'Fecha en la que te uniste',
             'Se unió a Instagram'
         ]);
+
 
         if (!dateRaw) {
             dateRaw = rxFirst(content, [
@@ -987,6 +1194,7 @@ https://x.com/usuario3"></textarea>
             ]);
         }
 
+
         if (!dateRaw) {
             dateRaw = extractLabeledValue(content, [
                 /Date joined/i,
@@ -997,12 +1205,14 @@ https://x.com/usuario3"></textarea>
             ]);
         }
 
+
         let accountLocation = extractInstagramDialogValue(dialog, [
             'Account based in',
             'Cuenta basada en',
             'País donde se encuentra la cuenta',
             'Ubicación de la cuenta'
         ]);
+
 
         if (!accountLocation) {
             accountLocation = rxFirst(content, [
@@ -1013,6 +1223,7 @@ https://x.com/usuario3"></textarea>
             ]);
         }
 
+
         if (!accountLocation) {
             accountLocation = extractLabeledValue(content, [
                 /Account based in/i,
@@ -1022,6 +1233,7 @@ https://x.com/usuario3"></textarea>
             ]);
         }
 
+
         const changeCount = extractCountAroundLabel(content, [
             /Former username count/i,
             /Former usernames/i,
@@ -1030,6 +1242,7 @@ https://x.com/usuario3"></textarea>
             /Nombres de usuario anteriores/i,
             /Cambios de nombre de usuario/i
         ]);
+
 
         return {
             USUARIO: getUserFromUrl() || 'N/D',
@@ -1053,16 +1266,19 @@ https://x.com/usuario3"></textarea>
         };
     }
 
+
     function extractInstagramDialogValue(dialog, labels) {
         const normalizedLabels = labels.map(normalizeText);
         const candidates = Array.from(dialog.querySelectorAll(
             '[aria-label],[data-bloks-name="bk.components.Flexbox"]'
         ));
 
+
         for (const candidate of candidates) {
             const aria = clean(
                 candidate.getAttribute('aria-label') || ''
             );
+
 
             const lines = String(
                 candidate.innerText ||
@@ -1073,16 +1289,20 @@ https://x.com/usuario3"></textarea>
                 .map(clean)
                 .filter(Boolean);
 
+
             for (const label of normalizedLabels) {
                 const lineIndex = lines.findIndex(line => {
                     return normalizeText(line) === label;
                 });
 
+
                 if (lineIndex >= 0 && lines[lineIndex + 1]) {
                     return lines[lineIndex + 1];
                 }
 
+
                 const normalizedAria = normalizeText(aria);
+
 
                 if (normalizedAria.startsWith(`${label} `)) {
                     return clean(
@@ -1092,18 +1312,22 @@ https://x.com/usuario3"></textarea>
             }
         }
 
+
         return '';
     }
 
+
     /********************************************************************
-     * FACEBOOK: PERFIL, GRUPO Y /ABOUT
+     * FACEBOOK: PERFIL, GRUPO Y /ABOUT_PROFILE_TRANSPARENCY
      ********************************************************************/
+
 
     function startFacebookNumericIdFallback(fromQueue) {
         const profileId = (() => {
             try {
                 const url = new URL(location.href);
                 const id = url.searchParams.get('id') || '';
+
 
                 return (
                     url.pathname.startsWith('/profile.php') &&
@@ -1116,7 +1340,9 @@ https://x.com/usuario3"></textarea>
             }
         })();
 
+
         if (!profileId) return false;
+
 
         savePending({
             stage: 'facebook-id-fallback',
@@ -1125,22 +1351,27 @@ https://x.com/usuario3"></textarea>
             fromQueue
         });
 
+
         setStatus(
             `El ID ${profileId} no corresponde a un perfil accesible.\n` +
             'Probándolo como grupo de Facebook…'
         );
+
 
         setTimeout(() => {
             location.href =
                 `https://www.facebook.com/groups/${encodeURIComponent(profileId)}`;
         }, 700);
 
+
         return true;
     }
+
 
     async function captureFacebookFlow(fromQueue) {
         const type = getFacebookObjectType();
         const identity = getFacebookIdentity();
+
 
         if (!identity) {
             return commitRow(
@@ -1153,21 +1384,44 @@ https://x.com/usuario3"></textarea>
             );
         }
 
+
         let currentData = extractFacebookPage();
 
+
         if (type === 'PERFIL') {
+            setStatus('Abriendo información / transparencia del perfil de Facebook…');
             const popupData = await openAndReadFacebookProfileInfo();
             currentData = mergeRows(currentData, popupData);
         }
+
+
         const existing = findExistingRow(
             currentData.USUARIO,
-            type
+            type,
+            currentData['ID interno']
         );
+
 
         const combinedBase = mergeRows(existing, currentData);
 
-        if (!isFacebookAboutPage()) {
+
+        const needsAboutNavigation =
+            !isFacebookAboutPage() &&
+            (
+                !isUsefulValue(combinedBase['FECHA DE CREACIÓN DE CUENTA']) ||
+                (
+                    type === 'GRUPO' &&
+                    (
+                        !isUsefulValue(combinedBase['GRUPO PÚBLICO']) ||
+                        !isUsefulValue(combinedBase['GRUPO VISIBLE'])
+                    )
+                )
+            );
+
+
+        if (needsAboutNavigation) {
             const aboutUrl = facebookAboutUrl();
+
 
             if (aboutUrl) {
                 savePending({
@@ -1178,15 +1432,18 @@ https://x.com/usuario3"></textarea>
                     base: combinedBase
                 });
 
+
                 setStatus(
                     `${type === 'GRUPO' ? 'Grupo' : 'Perfil'} base capturado.\n` +
-                    `Abriendo el apartado Acerca de…`
+                    `Abriendo sección de transparencia / Acerca de…`
                 );
+
 
                 location.href = aboutUrl;
                 return null;
             }
         }
+
 
         return commitRow(
             mergeRows(combinedBase, extractFacebookPage()),
@@ -1194,13 +1451,16 @@ https://x.com/usuario3"></textarea>
         );
     }
 
+
     function extractFacebookPage() {
         const body = getBodyText();
         const type = getFacebookObjectType();
 
+
         if (type === 'GRUPO') {
             const groupName = extractFacebookGroupName();
             const groupId = getFacebookGroupIdFromUrl() || getFacebookIdentity();
+
 
             return {
                 USUARIO: groupId || 'N/D',
@@ -1213,8 +1473,6 @@ https://x.com/usuario3"></textarea>
                 PLATAFORMA: PLATFORM,
                 'FECHA DE CREACIÓN DE CUENTA':
                     extractFacebookCreationDate(body),
-                'UBICACIÓN DE LA CUENTA':
-                    findFacebookLocation(body) || 'N/D',
                 'ÚLTIMO CAMBIO DE USUARIO': 'N/D',
                 'ÚLTIMA ACTUALIZACIÓN DEL PERFIL': 'N/D',
                 'Nº CAMBIOS DE USUARIO': 'N/D',
@@ -1225,81 +1483,247 @@ https://x.com/usuario3"></textarea>
                 EXISTE: 'SI',
                 URL: canonicalProfileUrl(),
                 OBSERVACIONES:
-                    'Para grupos, USUARIO contiene el nombre del grupo y Nº SEGUIDORES contiene sus miembros.'
+                    'Para grupos, USUARIO contiene el identificador del grupo y Nº SEGUIDORES contiene sus miembros.'
             };
         }
 
+
         const urlName = getFacebookProfileUrlName() || 'N/D';
         const displayName = extractFacebookDisplayName() || 'N/D';
+
 
         return {
             USUARIO: urlName,
             'NOMBRE VISIBLE': displayName,
             'ID interno': findFacebookInternalId('PERFIL'),
             'Nº SEGUIDORES': extractFacebookFriends(body),
-            'Nº SEGUIDOS': extractFollowingMetric(body),
+            'Nº SEGUIDOS': extractFacebookFollowing(body),
             'TIPO DE OBJETO': 'PERFIL',
             MÉTRICA: 'AMIGOS',
             PLATAFORMA: PLATFORM,
             'FECHA DE CREACIÓN DE CUENTA':
                 extractFacebookCreationDate(body),
-            'UBICACIÓN DE LA CUENTA':
-                findFacebookLocation(body) || 'N/D',
             'ÚLTIMO CAMBIO DE USUARIO': 'N/D',
-            'ÚLTIMA ACTUALIZACIÓN DEL PERFIL': 'N/D',
+            'ÚLTIMA ACTUALIZACIÓN DEL PERFIL':
+                extractFacebookLastUpdated(body) || 'N/D',
             'Nº CAMBIOS DE USUARIO': 'N/D',
             EXISTE: 'SI',
             URL: canonicalProfileUrl(),
             OBSERVACIONES:
-                'Para perfiles personales se recoge el número visible de amigos, no los seguidores.'
+                'Datos extraídos de la cabecera, menú de información del perfil y transparencia.'
         };
     }
+
 
     async function openAndReadFacebookProfileInfo() {
         let dialog = findFacebookProfileInfoDialog();
 
+
         if (!dialog) {
-            const heading = Array.from(
-                document.querySelectorAll('h1')
-            ).find(isVisible);
+            const optionsButton = findFacebookOptionsButton();
 
-            if (!heading) return null;
 
-            const clickable =
-                heading.querySelector(
-                    '[role="button"][tabindex="0"]'
-                ) ||
-                heading.closest('[role="button"],button') ||
-                heading;
+            if (optionsButton) {
+                safeClick(optionsButton);
 
-            if (!safeClick(clickable)) return null;
 
-            dialog = await waitForDom(
-                findFacebookProfileInfoDialog,
-                8000
-            );
+                const menuItem = await waitForDom(
+                    findFacebookProfileInfoMenuItem,
+                    5000
+                );
+
+
+                if (menuItem) {
+                    safeClick(menuItem);
+
+
+                    dialog = await waitForDom(
+                        findFacebookProfileInfoDialog,
+                        8000
+                    );
+                }
+            }
         }
 
+
         if (!dialog) return null;
+
+
+        // Esperar a que el contenido interno (GraphQL) del modal termine de renderizar la fecha
+        await waitFor(() => {
+            const textContent = dialog.innerText || dialog.textContent || '';
+            return (
+                extractFacebookCreationDate(textContent) !== 'N/D' ||
+                /\b(?:19|20)\d{2}\b/.test(textContent)
+            );
+        }, 5500, 250);
+
 
         const data = parseFacebookProfileInfoDialog(dialog);
         closeFacebookDialog(dialog);
         return data;
     }
 
+
+    function findFacebookOptionsButton() {
+        const exactLabels = [
+            'acciones para este perfil',
+            'acciones del perfil',
+            'más opciones',
+            'mas opciones',
+            'opciones del perfil',
+            'ver más opciones',
+            'ver mas opciones',
+            'profile actions',
+            'actions for this profile',
+            'more options',
+            'profile options',
+            'see more options'
+        ];
+
+
+        const scopes = [
+            document.querySelector('[role="main"]'),
+            document.querySelector('main'),
+            document.body
+        ].filter(Boolean);
+
+
+        for (const scope of scopes) {
+            const buttons = Array.from(scope.querySelectorAll(
+                '[role="button"][aria-label], button[aria-label], [aria-haspopup="menu"][aria-label]'
+            ));
+
+
+            for (const button of buttons) {
+                if (!isVisible(button)) continue;
+
+
+                // No pulsar botones dentro de publicaciones/artículos del muro
+                if (button.closest('[role="article"]')) continue;
+
+
+                const aria = normalizeText(
+                    button.getAttribute('aria-label') ||
+                    button.getAttribute('title') ||
+                    ''
+                );
+
+
+                if (exactLabels.some(label => aria === label || aria.startsWith(label))) {
+                    return button;
+                }
+            }
+
+
+            // Fallback: botón de menú desplegable con icono SVG de tres puntos en la cabecera del perfil
+            const menuButtons = Array.from(scope.querySelectorAll(
+                '[role="button"][aria-haspopup="menu"], [role="button"]'
+            ));
+
+
+            for (const button of menuButtons) {
+                if (!isVisible(button) || button.closest('[role="article"]') || button.closest('[role="tablist"]')) {
+                    continue;
+                }
+
+
+                const circles = button.querySelectorAll('svg circle, svg path');
+                const inner = clean(button.innerText || '');
+                const aria = normalizeText(button.getAttribute('aria-label') || '');
+
+
+                if (
+                    inner === '' &&
+                    circles.length >= 1 &&
+                    !/mensaje|message|amigo|friend|seguir|follow|buscar|search|editar|edit|compartir|share|notificaci/i.test(aria) &&
+                    button.getAttribute('aria-haspopup') === 'menu'
+                ) {
+                    return button;
+                }
+            }
+        }
+
+
+        return null;
+    }
+
+
+    function findFacebookProfileInfoMenuItem() {
+        const labels = [
+            'informacion sobre este perfil',
+            'información sobre este perfil',
+            'informacion sobre el perfil',
+            'información sobre el perfil',
+            'informacion del perfil',
+            'información del perfil',
+            'informacion sobre esta pagina',
+            'información sobre esta página',
+            'informacion sobre esta cuenta',
+            'información sobre esta cuenta',
+            'transparencia del perfil',
+            'transparencia de la pagina',
+            'transparencia de la página',
+            'acerca de este perfil',
+            'acerca de esta pagina',
+            'acerca de esta cuenta',
+            'about this profile',
+            'about this page',
+            'about this account',
+            'profile transparency',
+            'page transparency',
+            'profile information'
+        ].map(normalizeText);
+
+
+        const candidates = Array.from(document.querySelectorAll(
+            '[role="menuitem"], [role="menu"] [role="button"], [role="dialog"] [role="button"], span'
+        ));
+
+
+        for (const element of candidates) {
+            const textContent = normalizeText(
+                element.innerText || element.textContent || ''
+            );
+
+
+            if (!textContent || textContent.length > 90) continue;
+
+
+            if (labels.some(label => textContent === label || textContent.includes(label))) {
+                const clickable = element.closest(
+                    '[role="menuitem"],[role="button"],a,button'
+                ) || element;
+
+
+                if (isVisible(clickable)) {
+                    return clickable;
+                }
+            }
+        }
+
+
+        return null;
+    }
+
+
     function findFacebookProfileInfoDialog() {
         const dialogs = Array.from(document.querySelectorAll(
             '[role="dialog"], [aria-modal="true"]'
         )).reverse();
 
+
         return dialogs.find(dialog => {
+            if (!isVisible(dialog)) return false;
             const content = normalizeText(
                 dialog.innerText || dialog.textContent || ''
             );
 
-            return /se unio a facebook|fecha de incorporacion|fecha de creacion del perfil|creacion del perfil|joined facebook|profile created|perfil actualizado|ultima actualizacion del perfil|ultima actualizacion|profile last updated|last profile update/.test(content);
+
+            return /informacion sobre este perfil|informacion sobre el perfil|informacion sobre esta pagina|about this profile|about this page|transparencia del perfil|transparencia de la pagina|profile transparency|page transparency|se unio|fecha de creacion|creacion del perfil|creacion de la pagina|joined facebook|profile created|page created|perfil actualizado/.test(content);
         }) || null;
     }
+
 
     function parseFacebookProfileInfoDialog(dialog) {
         const content =
@@ -1307,57 +1731,46 @@ https://x.com/usuario3"></textarea>
             dialog.textContent ||
             '';
 
-        let creationRaw = rxFirst(content, [
-            /Se unió a Facebook\s*:?\s*([^\n]{3,80})/i,
-            /Fecha de incorporación(?: a Facebook| a la plataforma)?\s*:?\s*([^\n]{3,80})/i,
-            /Fecha de creación del perfil\s*:?\s*([^\n]{3,80})/i,
-            /Creación del perfil\s*:?\s*([^\n]{3,80})/i,
-            /Joined Facebook(?: in| on)?\s*:?\s*([^\n]{3,80})/i,
-            /Profile created(?: on)?\s*:?\s*([^\n]{3,80})/i
-        ]);
 
-        if (!creationRaw) {
-            creationRaw = extractLabeledValue(content, [
-                /Se unió a Facebook/i,
-                /Fecha de incorporación a Facebook/i,
-                /Fecha de incorporación a la plataforma/i,
-                /Fecha de incorporación/i,
-                /Fecha de creación del perfil/i,
-                /Creación del perfil/i,
-                /Joined Facebook/i,
-                /Profile created/i
-            ]);
-        }
+        const creation = extractFacebookCreationDate(content);
+        const updatedRaw = extractFacebookLastUpdated(content);
 
+
+        return {
+            'FECHA DE CREACIÓN DE CUENTA': creation !== 'N/D' ? creation : 'N/D',
+            'ÚLTIMA ACTUALIZACIÓN DEL PERFIL': updatedRaw || 'N/D',
+            OBSERVACIONES:
+                'Fecha de incorporación y actualización obtenidas del popup del perfil.'
+        };
+    }
+
+
+    function extractFacebookLastUpdated(content) {
         let updatedRaw = rxFirst(content, [
             /Perfil actualizado\s*:?\s*([^\n]{3,80})/i,
-            /Última actualización del perfil\s*:?\s*([^\n]{3,80})/i,
-            /Última actualización\s*:?\s*([^\n]{3,80})/i,
+            /[UÚ]ltima actualizaci[oó]n del perfil\s*:?\s*([^\n]{3,80})/i,
+            /[UÚ]ltima actualizaci[oó]n\s*:?\s*([^\n]{3,80})/i,
             /Perfil actualizado el\s*:?\s*([^\n]{3,80})/i,
             /Profile last updated\s*:?\s*([^\n]{3,80})/i,
             /Last profile update\s*:?\s*([^\n]{3,80})/i
         ]);
 
+
         if (!updatedRaw) {
             updatedRaw = extractLabeledValue(content, [
                 /Perfil actualizado/i,
-                /Última actualización del perfil/i,
-                /Última actualización/i,
+                /[UÚ]ltima actualizaci[oó]n del perfil/i,
+                /[UÚ]ltima actualizaci[oó]n/i,
                 /Perfil actualizado el/i,
                 /Profile last updated/i,
                 /Last profile update/i
             ]);
         }
 
-        return {
-            'FECHA DE CREACIÓN DE CUENTA':
-                formatMonthYearEs(creationRaw),
-            'ÚLTIMA ACTUALIZACIÓN DEL PERFIL':
-                clean(updatedRaw) || 'N/D',
-            OBSERVACIONES:
-                'Fecha de incorporación y actualización obtenidas del popup del nombre visible.'
-        };
+
+        return clean(updatedRaw);
     }
+
 
     function closeFacebookDialog(dialog) {
         const closeButton = dialog.querySelector(
@@ -1369,10 +1782,12 @@ https://x.com/usuario3"></textarea>
             true
         );
 
+
         if (closeButton) {
             safeClick(closeButton);
             return;
         }
+
 
         document.dispatchEvent(
             new KeyboardEvent('keydown', {
@@ -1382,6 +1797,7 @@ https://x.com/usuario3"></textarea>
             })
         );
     }
+
 
     function extractFacebookGroupMembers(body) {
         return extractMetricFromLines(
@@ -1396,30 +1812,35 @@ https://x.com/usuario3"></textarea>
         );
     }
 
+
     function extractFacebookGroupPublic(body) {
         const lines = String(body || '')
             .split(/\r?\n/)
             .map(normalizeText)
             .filter(Boolean);
 
+
         if (
             lines.some(line => {
-                return /^(?:grupo )?publico\b|^public(?: group)?\b/.test(line);
+                return /^(?:grupo )?publico\b|^public(?: group)?\b|\bgrupo publico\b|\bpublic group\b/.test(line);
             })
         ) {
             return 'SI';
         }
 
+
         if (
             lines.some(line => {
-                return /^(?:grupo )?privado\b|^private(?: group)?\b/.test(line);
+                return /^(?:grupo )?privado\b|^private(?: group)?\b|\bgrupo privado\b|\bprivate group\b/.test(line);
             })
         ) {
             return 'NO';
         }
 
+
         return 'N/D';
     }
+
 
     function extractFacebookGroupVisible(body) {
         const lines = String(body || '')
@@ -1427,110 +1848,116 @@ https://x.com/usuario3"></textarea>
             .map(normalizeText)
             .filter(Boolean);
 
+
         if (
             lines.some(line => {
-                return /^(?:grupo )?visible\b|^visible group\b/.test(line);
+                return /^(?:grupo )?visible\b|^visible group\b|\bgrupo visible\b/.test(line);
             })
         ) {
             return 'SI';
         }
 
+
         if (
             lines.some(line => {
-                return /^(?:grupo )?oculto\b|^hidden(?: group)?\b/.test(line);
+                return /^(?:grupo )?oculto\b|^hidden(?: group)?\b|\bgrupo oculto\b/.test(line);
             })
         ) {
             return 'NO';
         }
 
+
         return 'N/D';
     }
 
+
     function extractFacebookFriends(body) {
-        return extractMetricFromLines(
+        // 1. Buscar en enlaces de cabecera (amigos / seguidores)
+        const headerLinks = Array.from(document.querySelectorAll(
+            '[role="main"] a[href*="/friends"], [role="main"] a[href*="sk=friends"], [role="main"] a[href*="/followers"]'
+        ));
+
+
+        for (const link of headerLinks) {
+            const linkText = clean(link.innerText || link.textContent || '');
+            if (/mutual|en común|en comun/i.test(linkText)) continue;
+
+
+            const m = linkText.match(
+                /([\d][\d.,\s]*(?:K|M|B|mil|millones|milhões)?)\s*(?:friends|amigos|amigas|followers|seguidores|seguidoras)?\b/i
+            );
+            if (m?.[1]) return clean(m[1]);
+        }
+
+
+        // 2. Buscar amigos en el texto del perfil
+        const friends = extractMetricFromLines(
             body,
             [
-                /([\d][\d.,\s]*(?:K|M|B|mil|millones|milhões)?)\s+(?:friends|amigos|amigas)\b/i,
-                /(?:friends|amigos|amigas)\s*:?\s*([\d][\d.,\s]*(?:K|M|B|mil|millones|milhões)?)/i
+                /(?:^|[\s•·|])([\d][\d.,\s]*(?:K|M|B|mil|millones|milhões)?)\s+(?:friends|amigos|amigas)\b/i,
+                /\b(?:friends|amigos|amigas)\s*:?\s*([\d][\d.,\s]*(?:K|M|B|mil|millones|milhões)?)/i
             ],
             [
                 /mutual|en común|en comun|amigos en común|amigos en comun/i
             ]
         );
-    }
 
-    function extractFacebookCreationDate(body) {
-        const raw = rxFirst(body, [
-            /Joined Facebook in\s+([A-Za-z]+\s+\d{4})/i,
-            /Joined Facebook\s+([A-Za-z]+\s+\d{4})/i,
-            /Se unió a Facebook en\s+([^\n]{3,80})/i,
-            /Grupo creado el\s+([^\n]{3,80})/i,
-            /Group created on\s+([^\n]{3,80})/i,
-            /Created on\s+([^\n]{3,80})/i,
-            /Creado el\s+([^\n]{3,80})/i
-        ]);
 
-        return formatMonthYearEs(raw);
-    }
+        if (friends !== 'N/D') return friends;
 
-    function extractFacebookGroupName() {
-        const heading = Array.from(
-            document.querySelectorAll('h1')
-        ).find(isVisible);
 
-        if (heading) {
-            const value = clean(
-                heading.innerText || heading.textContent || ''
-            );
-
-            if (value) return value;
-        }
-
-        return cleanFacebookTitle(
-            metaContent('meta[property="og:title"]') ||
-            document.title
+        // 3. Fallback para perfiles en Modo Profesional o Páginas que muestran "seguidores" en lugar de amigos
+        return extractMetricFromLines(
+            body,
+            [
+                /(?:^|[\s•·|])([\d][\d.,\s]*(?:K|M|B|mil|millones|milhões)?)\s+(?:followers|seguidores|seguidoras)\b/i,
+                /(?:Followed by|Seguido por)\s+([\d][\d.,\s]*(?:K|M|B|mil|millones|milhões)?)\s+(?:people|personas)\b/i
+            ],
+            []
         );
     }
 
-    function extractFacebookDisplayName() {
-        const heading = Array.from(
-            document.querySelectorAll('h1')
-        ).find(isVisible);
 
-        if (heading) {
-            return clean(
-                heading.innerText || heading.textContent || ''
+    function extractFacebookFollowing(body) {
+        // 1. Buscar directamente en enlaces DOM de "seguidos / following"
+        const followingLinks = Array.from(document.querySelectorAll(
+            '[role="main"] a[href*="/following"], [role="main"] a[href*="sk=following"]'
+        ));
+
+
+        for (const link of followingLinks) {
+            const linkText = clean(link.innerText || link.textContent || '');
+            const m = linkText.match(
+                /([\d][\d.,\s]*(?:K|M|B|mil|millones|milhões)?)\s*(?:following|siguiendo|seguidos|seguidas)?\b/i
             );
+            if (m?.[1]) return clean(m[1]);
         }
 
-        return cleanFacebookTitle(
-            metaContent('meta[property="og:title"]') ||
-            document.title
+
+        // 2. Buscar en el texto visible (soporta separadores • / · y la frase "Sigue a X personas" de Detalles)
+        const fromLines = extractMetricFromLines(
+            body,
+            [
+                /(?:^|[\s•·|,\n\r])([\d][\d.,\s]*(?:K|M|B|mil|millones|milhões)?)\s+(?:following|siguiendo|seguidos|seguidas)\b/i,
+                /\b(?:following|siguiendo|seguidos|seguidas)\s*:?\s*([\d][\d.,\s]*(?:K|M|B|mil|millones|milhões)?)/i,
+                /\b(?:sigue\s+a)\s+([\d][\d.,\s]*(?:K|M|B|mil|millones|milhões)?)\s+personas?\b/i
+            ],
+            []
         );
-    }
 
-    function cleanFacebookTitle(value) {
-        return clean(value)
-            .replace(/\s*\|\s*Facebook\s*$/i, '')
-            .replace(/\s*-\s*Facebook\s*$/i, '');
-    }
 
-    function findFacebookLocation(body) {
-        const lines = String(body || '')
-            .split(/\r?\n/)
-            .map(clean)
-            .filter(Boolean);
+        if (fromLines !== 'N/D') return fromLines;
 
-        const patterns = [
-            /^(?:Lives in|Vive en|Reside en)\s+(.{2,100})$/i,
-            /^(?:From|De|Natural de)\s+(.{2,100})$/i,
-            /^(?:Based in|Con sede en)\s+(.{2,100})$/i,
-            /^(?:Current city|Ciudad actual)\s*:?\s*(.{2,100})$/i
-        ];
 
-        for (const line of lines) {
-            for (const pattern of patterns) {
-                const match = line.match(pattern);
+        // 3. Buscar en los datos JSON / GraphQL embebidos en el HTML
+        for (const source of getEmbeddedTextSources()) {
+            for (const variant of embeddedSourceVariants(source)) {
+                const match = variant.match(
+                    /"text"\s*:\s*"([\d][\d.,\s]*(?:K|M|B|mil|millones|milhões)?)\s+(?:following|siguiendo|seguidos|seguidas)"/i
+                ) || variant.match(
+                    /"text"\s*:\s*"Sigue a\s+([\d][\d.,\s]*(?:K|M|B|mil|millones|milhões)?)\s+personas?"/i
+                );
+
 
                 if (match?.[1]) {
                     return clean(match[1]);
@@ -1538,12 +1965,239 @@ https://x.com/usuario3"></textarea>
             }
         }
 
-        return '';
+
+        return 'N/D';
     }
+
+
+    function extractFacebookCreationDate(body) {
+        if (!body) return 'N/D';
+
+
+        const patterns = [
+            /se\s+uni[oó]\s+en\s+([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+\s+(?:del?\s+)?\d{4})/i,
+            /se\s+uni[oó]\s+en\s+(\d{4})/i,
+            /se\s+uni[oó](?:\s+a\s+facebook)?\s+el\s+([^\n.,;]{3,80})/i,
+            /se\s+uni[oó]\s+a\s+facebook(?:\s+en)?\s+([^\n.,;]{3,80})/i,
+            /joined(?:\s+facebook)?(?:\s+in|\s+on)?\s+([A-Za-z]+\s+\d{1,2},?\s+\d{4})/i,
+            /joined(?:\s+facebook)?(?:\s+in|\s+on)?\s+([A-Za-z]+\s+\d{4})/i,
+            /joined(?:\s+facebook)?(?:\s+in|\s+on)?\s+(\d{4})/i,
+            /joined\s+facebook\s*:?\s*([^\n.,;]{3,80})/i,
+            /fecha\s+de\s+creaci[oó]n\s+del?\s+perfil\s*:?\s*([^\n.,;]{3,80})/i,
+            /fecha\s+de\s+creaci[oó]n\s+de\s+la\s+cuenta\s*:?\s*([^\n.,;]{3,80})/i,
+            /fecha\s+de\s+creaci[oó]n\s+de\s+la\s+p[aá]gina\s*:?\s*([^\n.,;]{3,80})/i,
+            /fecha\s+de\s+creaci[oó]n\s+del?\s+grupo\s*:?\s*([^\n.,;]{3,80})/i,
+            /fecha\s+de\s+creaci[oó]n\s*:?\s*([^\n.,;]{3,80})/i,
+            /creaci[oó]n\s+del?\s+(?:perfil|p[aá]gina|cuenta|grupo)\s*:?\s*([^\n.,;]{3,80})/i,
+            /(?:perfil|p[aá]gina|cuenta|grupo)\s+cread[oa](?:\s+el|\s+en)?\s*:?\s*([^\n.,;]{3,80})/i,
+            /(?:profile|page|account|group)\s+created(?:\s+on|\s+in)?\s*:?\s*([^\n.,;]{3,80})/i,
+            /created\s+on\s+([^\n.,;]{3,80})/i,
+            /creation\s+date\s*:?\s*([^\n.,;]{3,80})/i,
+            /fecha\s+de\s+incorporaci[oó]n(?:\s+a\s+facebook|\s+a\s+la\s+plataforma)?\s*:?\s*([^\n.,;]{3,80})/i,
+            /miembro\s+desde\s*:?\s*([^\n.,;]{3,80})/i,
+            /member\s+since\s*:?\s*([^\n.,;]{3,80})/i
+        ];
+
+
+        const visibleRaw = rxFirst(body, patterns);
+
+
+        if (visibleRaw) {
+            const formatted = formatMonthYearEs(visibleRaw);
+            if (formatted !== 'N/D') return formatted;
+        }
+
+
+        const labels = [
+            /fecha\s+de\s+creaci[oó]n\s+del?\s+perfil/i,
+            /fecha\s+de\s+creaci[oó]n\s+de\s+la\s+cuenta/i,
+            /fecha\s+de\s+creaci[oó]n\s+de\s+la\s+p[aá]gina/i,
+            /fecha\s+de\s+creaci[oó]n\s+del?\s+grupo/i,
+            /fecha\s+de\s+creaci[oó]n/i,
+            /creaci[oó]n\s+del?\s+perfil/i,
+            /creaci[oó]n\s+de\s+la\s+cuenta/i,
+            /creaci[oó]n\s+de\s+la\s+p[aá]gina/i,
+            /perfil\s+creado/i,
+            /cuenta\s+creada/i,
+            /p[aá]gina\s+creada/i,
+            /grupo\s+creado/i,
+            /profile\s+created/i,
+            /page\s+created/i,
+            /account\s+created/i,
+            /group\s+created/i,
+            /se\s+uni[oó]\s+a\s+facebook/i,
+            /se\s+uni[oó]\s+en/i,
+            /se\s+uni[oó]/i,
+            /joined\s+facebook/i,
+            /joined\s+in/i,
+            /joined/i,
+            /fecha\s+de\s+incorporaci[oó]n/i,
+            /member\s+since/i,
+            /miembro\s+desde/i
+        ];
+
+
+        const labeledRaw = extractLabeledValue(body, labels);
+
+
+        if (labeledRaw) {
+            const formatted = formatMonthYearEs(labeledRaw);
+            if (formatted !== 'N/D') return formatted;
+        }
+
+
+        return extractFacebookCreationDateFromSource();
+    }
+
+
+    function extractFacebookCreationDateFromSource() {
+        const sources = getEmbeddedTextSources();
+
+
+        for (const source of sources) {
+            for (const variant of embeddedSourceVariants(source)) {
+                const textMatches = variant.matchAll(/"text"\s*:\s*"([^"]{4,120})"/gi);
+                for (const match of textMatches) {
+                    const textVal = match[1];
+                    if (
+                        /se\s+uni[oó]|joined|fecha\s+de\s+creaci[oó]n|creaci[oó]n\s+del?\s+(?:perfil|cuenta|p[aá]gina|grupo)|(?:perfil|cuenta|p[aá]gina|grupo)\s+cread[oa]|created\s+on|profile\s+created|page\s+created|member\s+since|miembro\s+desde/i.test(textVal)
+                    ) {
+                        const parsed = extractFacebookCreationDateFromRawString(textVal);
+                        if (parsed && parsed !== 'N/D') {
+                            return parsed;
+                        }
+                    }
+                }
+
+
+                // Cuando en GraphQL un nodo tiene "text":"Fecha de creación del perfil" y el siguiente "text":"mayo de 2018"
+                const adjacentTextPattern = /"text"\s*:\s*"(?:Fecha de creaci[oó]n[^"]*|Creaci[oó]n del perfil|Se uni[oó] a Facebook|Profile created|Page created|Date joined)"[\s\S]{0,350}?"text"\s*:\s*"([^"]{4,60})"/gi;
+                let adjMatch;
+                while ((adjMatch = adjacentTextPattern.exec(variant)) !== null) {
+                    const parsed = formatMonthYearEs(adjMatch[1]);
+                    if (parsed !== 'N/D') return parsed;
+                }
+
+
+                const labelPattern = /(?:fecha\s+de\s+creaci[oó]n|creaci[oó]n\s+del?\s+(?:perfil|cuenta|p[aá]gina|grupo)|profile\s+created|page\s+created|account\s+created)[^}]{0,300}?"(?:text|value|subtitle|title)"\s*:\s*"([^"]{4,60})"/gi;
+                let labelMatch;
+                while ((labelMatch = labelPattern.exec(variant)) !== null) {
+                    const parsed = formatMonthYearEs(labelMatch[1]);
+                    if (parsed !== 'N/D') return parsed;
+                }
+
+
+                const specificDatePattern = /"(?:page_creation_date|formatted_date_created|date_joined|join_date|creation_time_text)"\s*:\s*"?([^"}{]{4,60})"?/gi;
+                let dateMatch;
+                while ((dateMatch = specificDatePattern.exec(variant)) !== null) {
+                    const parsed = formatMonthYearEs(dateMatch[1]);
+                    if (parsed !== 'N/D') return parsed;
+                }
+
+
+                const specificEpochPattern = /"(?:profile_creation_time|account_creation_time|user_creation_time|registration_time)"\s*:\s*(\d{9,11})\b/gi;
+                let epochMatch;
+                while ((epochMatch = specificEpochPattern.exec(variant)) !== null) {
+                    const parsed = formatEpochMonthYearEs(Number(epochMatch[1]));
+                    if (parsed !== 'N/D') return parsed;
+                }
+            }
+        }
+
+
+        return 'N/D';
+    }
+
+
+    function extractFacebookCreationDateFromRawString(text) {
+        if (!text) return 'N/D';
+
+
+        const patterns = [
+            /se\s+uni[oó]\s+en\s+([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+\s+(?:del?\s+)?\d{4})/i,
+            /se\s+uni[oó]\s+en\s+(\d{4})/i,
+            /se\s+uni[oó](?:\s+a\s+facebook)?\s+el\s+([^.\n.,;]{3,80})/i,
+            /se\s+uni[oó]\s+a\s+facebook(?:\s+en)?\s+([^\n.,;]{3,80})/i,
+            /joined(?:\s+facebook)?(?:\s+in|\s+on)?\s+([A-Za-z]+\s+\d{1,2},?\s+\d{4})/i,
+            /joined(?:\s+facebook)?(?:\s+in|\s+on)?\s+([A-Za-z]+\s+\d{4})/i,
+            /joined(?:\s+facebook)?(?:\s+in|\s+on)?\s+(\d{4})/i,
+            /fecha\s+de\s+creaci[oó]n\s+del?\s+(?:perfil|cuenta|p[aá]gina|grupo)\s*:?\s*([^\n.,;]{3,80})/i,
+            /fecha\s+de\s+creaci[oó]n\s*:?\s*([^\n.,;]{3,80})/i,
+            /(?:perfil|p[aá]gina|cuenta|grupo)\s+cread[oa](?:\s+el|\s+en)?\s*:?\s*([^\n.,;]{3,80})/i,
+            /(?:profile|page|account|group)\s+created(?:\s+on|\s+in)?\s*:?\s*([^\n.,;]{3,80})/i,
+            /created\s+on\s+([^\n.,;]{3,80})/i,
+            /member\s+since\s*:?\s*([^\n.,;]{3,80})/i,
+            /miembro\s+desde\s*:?\s*([^\n.,;]{3,80})/i
+        ];
+
+
+        for (const pattern of patterns) {
+            const match = text.match(pattern);
+            if (match?.[1]) {
+                const formatted = formatMonthYearEs(match[1]);
+                if (formatted !== 'N/D') return formatted;
+            }
+        }
+
+
+        return formatMonthYearEs(text);
+    }
+
+
+    function extractFacebookGroupName() {
+        const heading = Array.from(
+            document.querySelectorAll('h1')
+        ).find(isVisible);
+
+
+        if (heading) {
+            const value = clean(
+                heading.innerText || heading.textContent || ''
+            );
+
+
+            if (value) return value;
+        }
+
+
+        return cleanFacebookTitle(
+            metaContent('meta[property="og:title"]') ||
+            document.title
+        );
+    }
+
+
+    function extractFacebookDisplayName() {
+        const heading = Array.from(
+            document.querySelectorAll('h1')
+        ).find(isVisible);
+
+
+        if (heading) {
+            return clean(
+                heading.innerText || heading.textContent || ''
+            );
+        }
+
+
+        return cleanFacebookTitle(
+            metaContent('meta[property="og:title"]') ||
+            document.title
+        );
+    }
+
+
+    function cleanFacebookTitle(value) {
+        return clean(value)
+            .replace(/\s*\|\s*Facebook\s*$/i, '')
+            .replace(/\s*-\s*Facebook\s*$/i, '');
+    }
+
 
     /********************************************************************
      * TIKTOK
      ********************************************************************/
+
 
     async function extractTikTok() {
         const username =
@@ -1551,7 +2205,19 @@ https://x.com/usuario3"></textarea>
             text('[data-e2e="user-title"]') ||
             'N/D';
 
+
         let bundle = findTikTokUserBundle(username);
+
+
+        if (bundle.notFound || detectNotFound()) {
+            return buildUnavailableRow(
+                username,
+                'NO',
+                'El perfil de TikTok no existe, ha sido eliminado o está suspendido.'
+            );
+        }
+
+
         const creationKeys = [
             'createTime',
             'create_time',
@@ -1568,11 +2234,23 @@ https://x.com/usuario3"></textarea>
         const pageUser = bundle.user || {};
         let fetchedProfileHtml = false;
 
+
         if (
+            !pick(pageUser, ['id', 'uid', 'userId', 'user_id']) ||
             !pick(pageUser, creationKeys) ||
             !pick(pageUser, nicknameChangeKeys)
         ) {
             const fetchedBundle = await fetchTikTokUserBundle(username);
+
+
+            if (fetchedBundle.notFound) {
+                return buildUnavailableRow(
+                    username,
+                    'NO',
+                    'El perfil de TikTok no existe (confirmado al consultar el estado de la cuenta).'
+                );
+            }
+
 
             if (fetchedBundle.user) {
                 bundle = {
@@ -1580,18 +2258,35 @@ https://x.com/usuario3"></textarea>
                         ...pageUser,
                         ...fetchedBundle.user
                     },
-                    stats: bundle.stats || fetchedBundle.stats
+                    stats: bundle.stats || fetchedBundle.stats,
+                    notFound: false
                 };
                 fetchedProfileHtml = true;
             }
         }
 
+
         const user = bundle.user || {};
         const stats = bundle.stats || {};
+
 
         const internalId =
             pick(user, ['id', 'uid', 'userId', 'user_id']) ||
             'N/D';
+
+
+        const domUserTitle = text('[data-e2e="user-title"]');
+
+
+        // Si tras analizar DOM y JSON no hay ID ni título de usuario en absoluto, la cuenta no existe
+        if (internalId === 'N/D' && !domUserTitle) {
+            return buildUnavailableRow(
+                username,
+                'NO',
+                'No se encontraron datos de usuario ni elementos de perfil en TikTok.'
+            );
+        }
+
 
         const followers =
             pick(stats, [
@@ -1604,6 +2299,7 @@ https://x.com/usuario3"></textarea>
                 /([\d][\d.,\s]*(?:K|M|B|mil|millones)?)\s*(?:Followers|Seguidores)\b/i
             ]);
 
+
         const following =
             pick(stats, [
                 'followingCount',
@@ -1614,47 +2310,38 @@ https://x.com/usuario3"></textarea>
             text('[data-e2e="following-count"]') ||
             extractFollowingMetric(getBodyText());
 
-        /*
-         * Solo se usan campos explícitos de creación si aparecen asociados
-         * al objeto de usuario. No se deduce la fecha desde el ID.
-         */
-        const creationEpoch = pick(user, creationKeys);
 
-        /*
-         * TikTok publica el cambio del nombre visible en
-         * nickNameModifyTime. Es el mismo campo que usa TikTracker para
-         * informar del último cambio de nick; no se sustituye por la fecha
-         * de cambio del identificador @usuario.
-         */
+        const creationEpoch = pick(user, creationKeys);
         const nicknameChangeEpoch = pick(user, nicknameChangeKeys);
+
 
         const creationDate =
             formatEpochMonthYearEs(creationEpoch);
 
+
         const nicknameChangeDate =
             formatEpochMonthYearEs(nicknameChangeEpoch);
 
-        const location =
-            pick(user, [
-                'region',
-                'country',
-                'countryCode',
-                'country_code'
-            ]) ||
-            'N/D';
+
+        const location = await resolveTikTokLocation(username, user);
+
 
         const missingRestrictedFields =
             creationDate === 'N/D' ||
             nicknameChangeDate === 'N/D';
 
+
         return {
             USUARIO: username,
-            'NOMBRE VISIBLE': pick(user, [
-                'nickname',
-                'nickName',
-                'displayName',
-                'display_name'
-            ]) || 'N/D',
+            'NOMBRE VISIBLE':
+                pick(user, [
+                    'nickname',
+                    'nickName',
+                    'displayName',
+                    'display_name'
+                ]) ||
+                text('[data-e2e="user-subtitle"]') ||
+                'N/D',
             'ID interno': internalId,
             'Nº SEGUIDORES': String(followers || 'N/D'),
             'Nº SEGUIDOS': String(following || 'N/D'),
@@ -1668,17 +2355,199 @@ https://x.com/usuario3"></textarea>
             EXISTE: 'SI',
             URL: canonicalProfileUrl(),
             OBSERVACIONES: missingRestrictedFields
-                ? 'TikTok no ha publicado en esta carga la fecha de creación o el cambio de nick. No se han inferido mediante el ID.'
+                ? 'TikTok no ha publicado en esta carga la fecha de creación o el cambio de nick.'
                 : fetchedProfileHtml
-                    ? 'createTime y nickNameModifyTime obtenidos del objeto exacto del perfil devuelto por TikTok.'
-                    : 'createTime y nickNameModifyTime obtenidos del objeto exacto del usuario cargado en la página.'
+                    ? 'Datos obtenidos del objeto exacto del perfil devuelto por TikTok.'
+                    : 'Datos obtenidos del objeto exacto del usuario cargado en la página.'
         };
     }
 
+
+    async function resolveTikTokLocation(username, user) {
+        // 1. Propiedades directas del objeto user (si TikTok las incluye)
+        const directLocation = pick(user, [
+            'region',
+            'accountRegion',
+            'registerRegion',
+            'country',
+            'countryCode',
+            'country_code',
+            'location'
+        ]);
+
+
+        if (isUsefulValue(directLocation)) {
+            return clean(directLocation);
+        }
+
+
+        // 2. Buscar en texto/diálogo si "Acerca de esta cuenta" está visible en el DOM
+        const body = getBodyText();
+        const visibleLocation = rxFirst(body, [
+            /(?:Account based in|Cuenta basada en|Ubicación de la cuenta|País o región)\s*:?\s*([^\n]{2,60})/i
+        ]) || extractLabeledValue(body, [
+            /Account based in/i,
+            /Cuenta basada en/i,
+            /Ubicación de la cuenta/i
+        ]);
+
+
+        if (isUsefulValue(visibleLocation)) {
+            return cleanAccountLocation(visibleLocation);
+        }
+
+
+        // 3. Buscar "locationCreated" en los vídeos cargados en los scripts de la página
+        const embeddedVideoRegion = findTikTokVideoLocationInScripts(username);
+        if (embeddedVideoRegion) {
+            return embeddedVideoRegion;
+        }
+
+
+        // 4. Obtener un vídeo reciente desde el DOM o desde /embed/@username y leer su "locationCreated"
+        const fetchedVideoRegion = await fetchTikTokRegionFromVideoOrEmbed(username);
+        if (fetchedVideoRegion) {
+            return fetchedVideoRegion;
+        }
+
+
+        return 'N/D';
+    }
+
+
+    function findTikTokVideoLocationInScripts(username) {
+        const roots = [
+            parseJsonScript('SIGI_STATE'),
+            parseJsonScript('__UNIVERSAL_DATA_FOR_REHYDRATION__'),
+            parseJsonScript('__NEXT_DATA__')
+        ].filter(Boolean);
+
+
+        let foundRegion = '';
+
+
+        for (const root of roots) {
+            walkObject(root, obj => {
+                if (foundRegion || !obj || typeof obj !== 'object') return;
+
+
+                const authorUsername = clean(
+                    obj.author?.uniqueId ||
+                    obj.author?.unique_id ||
+                    (typeof obj.author === 'string' ? obj.author : '') ||
+                    ''
+                );
+
+
+                if (
+                    authorUsername &&
+                    sameIdentity(authorUsername, username)
+                ) {
+                    const candidate = clean(
+                        obj.locationCreated ||
+                        obj.location_created ||
+                        obj.poi?.countryCode ||
+                        obj.poi?.country ||
+                        ''
+                    );
+
+
+                    if (candidate && /^[A-Z]{2,3}$/i.test(candidate)) {
+                        foundRegion = candidate.toUpperCase();
+                    }
+                }
+            });
+        }
+
+
+        return foundRegion;
+    }
+
+
+    async function fetchTikTokRegionFromVideoOrEmbed(username) {
+        if (!username || username === 'N/D') return '';
+
+
+        try {
+            // Intentar localizar el primer enlace de vídeo del propio usuario en el DOM
+            const escapedUser = escapeRegExp(username);
+            const videoLinkPattern = new RegExp(`/@${escapedUser}/video/(\\d+)`, 'i');
+
+
+            let videoUrl = '';
+            const domLinks = Array.from(document.querySelectorAll('a[href*="/video/"]'));
+
+
+            for (const link of domLinks) {
+                const href = link.getAttribute('href') || '';
+                if (videoLinkPattern.test(href)) {
+                    videoUrl = new URL(href, location.origin).href;
+                    break;
+                }
+            }
+
+
+            // Si el DOM aún no tiene el enlace del vídeo, consultar la página ligera /embed/@username
+            if (!videoUrl) {
+                const embedResp = await fetch(
+                    `https://www.tiktok.com/embed/@${encodeURIComponent(username)}`,
+                    { credentials: 'include' }
+                );
+
+
+                if (embedResp.ok) {
+                    const embedHtml = await embedResp.text();
+
+
+                    const directLoc = embedHtml.match(/"locationCreated"\s*:\s*"([A-Za-z]{2,3})"/i);
+                    if (directLoc?.[1]) {
+                        return directLoc[1].toUpperCase();
+                    }
+
+
+                    const videoIdMatch =
+                        embedHtml.match(new RegExp(`/@${escapedUser}/video/(\\d{15,})`, 'i')) ||
+                        embedHtml.match(/"video_id"\s*:\s*"(\d{15,})"/i) ||
+                        embedHtml.match(/\/video\/(\d{15,})/i);
+
+
+                    if (videoIdMatch?.[1]) {
+                        videoUrl = `https://www.tiktok.com/@${encodeURIComponent(username)}/video/${videoIdMatch[1]}`;
+                    }
+                }
+            }
+
+
+            if (!videoUrl) return '';
+
+
+            const videoResp = await fetch(videoUrl, {
+                credentials: 'include',
+                headers: { accept: 'text/html,application/xhtml+xml' }
+            });
+
+
+            if (!videoResp.ok) return '';
+
+
+            const videoHtml = await videoResp.text();
+            const locMatch =
+                videoHtml.match(/"locationCreated"\s*:\s*"([A-Za-z]{2,3})"/i) ||
+                videoHtml.match(/"location_created"\s*:\s*"([A-Za-z]{2,3})"/i);
+
+
+            return locMatch?.[1] ? locMatch[1].toUpperCase() : '';
+        } catch {
+            return '';
+        }
+    }
+
+
     async function fetchTikTokUserBundle(username) {
         if (!username || username === 'N/D') {
-            return { user: null, stats: null };
+            return { user: null, stats: null, notFound: false };
         }
+
 
         try {
             const response = await fetch(
@@ -1692,9 +2561,16 @@ https://x.com/usuario3"></textarea>
                 }
             );
 
+
+            if (response.status === 404) {
+                return { user: null, stats: null, notFound: true };
+            }
+
+
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}`);
             }
+
 
             return findTikTokUserBundleInHtml(
                 await response.text(),
@@ -1706,9 +2582,11 @@ https://x.com/usuario3"></textarea>
                 error
             );
 
-            return { user: null, stats: null };
+
+            return { user: null, stats: null, notFound: false };
         }
     }
+
 
     function findTikTokUserBundleInHtml(html, username) {
         const parsedDocument = new DOMParser().parseFromString(
@@ -1722,7 +2600,9 @@ https://x.com/usuario3"></textarea>
         ].map(id => {
             const content = parsedDocument.getElementById(id)?.textContent;
 
+
             if (!content) return null;
+
 
             try {
                 return JSON.parse(content);
@@ -1733,6 +2613,7 @@ https://x.com/usuario3"></textarea>
         const structured = findTikTokUserBundle(username, roots);
         const rawUser = findTikTokUserObjectInHtml(html, username);
 
+
         return {
             user: structured.user || rawUser
                 ? {
@@ -1740,9 +2621,11 @@ https://x.com/usuario3"></textarea>
                     ...(rawUser || {})
                 }
                 : null,
-            stats: structured.stats
+            stats: structured.stats,
+            notFound: structured.notFound && !rawUser
         };
     }
+
 
     function findTikTokUserObjectInHtml(html, username) {
         const usernameJson = JSON.stringify(String(username));
@@ -1751,6 +2634,7 @@ https://x.com/usuario3"></textarea>
             'g'
         );
         let match;
+
 
         while ((match = marker.exec(html))) {
             const scriptStart = html.lastIndexOf('<script', match.index);
@@ -1761,13 +2645,16 @@ https://x.com/usuario3"></textarea>
                 ? html.indexOf('</script>', match.index)
                 : -1;
 
+
             if (contentStart <= 0 || contentEnd <= match.index) {
                 continue;
             }
 
+
             const scriptText = html.slice(contentStart, contentEnd);
             const markerIndex = match.index - contentStart;
             const openings = findOpenJsonObjects(scriptText, markerIndex);
+
 
             for (let index = openings.length - 1; index >= 0; index -= 1) {
                 const object = parseJsonObjectAt(
@@ -1781,6 +2668,7 @@ https://x.com/usuario3"></textarea>
                     ''
                 );
 
+
                 if (
                     objectUsername &&
                     objectUsername.toLowerCase() === username.toLowerCase()
@@ -1788,25 +2676,22 @@ https://x.com/usuario3"></textarea>
                     return object;
                 }
             }
-
-            /*
-             * No se buscan timestamps en un bloque de texto cercano. Ese
-             * bloque puede contener usuarios recomendados o el usuario de
-             * la sesión. Si no se reconstruye el objeto exacto, se devuelve
-             * N/D antes que atribuir al perfil una fecha ajena.
-             */
         }
+
 
         return null;
     }
+
 
     function findOpenJsonObjects(source, endIndex) {
         const stack = [];
         let inString = false;
         let escaped = false;
 
+
         for (let index = 0; index < endIndex; index += 1) {
             const character = source[index];
+
 
             if (inString) {
                 if (escaped) {
@@ -1817,8 +2702,10 @@ https://x.com/usuario3"></textarea>
                     inString = false;
                 }
 
+
                 continue;
             }
+
 
             if (character === '"') {
                 inString = true;
@@ -1829,16 +2716,20 @@ https://x.com/usuario3"></textarea>
             }
         }
 
+
         return stack;
     }
+
 
     function parseJsonObjectAt(source, startIndex) {
         let depth = 0;
         let inString = false;
         let escaped = false;
 
+
         for (let index = startIndex; index < source.length; index += 1) {
             const character = source[index];
+
 
             if (inString) {
                 if (escaped) {
@@ -1849,8 +2740,10 @@ https://x.com/usuario3"></textarea>
                     inString = false;
                 }
 
+
                 continue;
             }
+
 
             if (character === '"') {
                 inString = true;
@@ -1858,6 +2751,7 @@ https://x.com/usuario3"></textarea>
                 depth += 1;
             } else if (character === '}') {
                 depth -= 1;
+
 
                 if (depth === 0) {
                     try {
@@ -1869,8 +2763,10 @@ https://x.com/usuario3"></textarea>
             }
         }
 
+
         return null;
     }
+
 
     function findTikTokUserBundle(username, suppliedRoots = null) {
         const roots = suppliedRoots || [
@@ -1879,12 +2775,33 @@ https://x.com/usuario3"></textarea>
             parseJsonScript('__NEXT_DATA__')
         ].filter(Boolean);
 
+
         let matchedUser = null;
         let matchedStats = null;
+        let explicitNotFound = false;
+
 
         for (const root of roots) {
+            // Verificar statusCode oficial en __UNIVERSAL_DATA_FOR_REHYDRATION__
+            const userDetail = root?.__DEFAULT_SCOPE__?.['webapp.user-detail'];
+            if (userDetail && typeof userDetail === 'object') {
+                const statusCode = Number(userDetail.statusCode ?? 0);
+                const hasUserObj = Boolean(
+                    userDetail.userInfo?.user?.id ||
+                    userDetail.userInfo?.user?.uniqueId
+                );
+
+
+                // Códigos de TikTok cuando una cuenta no existe, está borrada o baneada (ej. 10202, 10221, 10222, 10223)
+                if (statusCode !== 0 && !hasUserObj) {
+                    explicitNotFound = true;
+                }
+            }
+
+
             walkObject(root, object => {
                 if (!object || typeof object !== 'object') return;
+
 
                 if (object.user && typeof object.user === 'object') {
                     const nestedUsername = clean(
@@ -1894,11 +2811,13 @@ https://x.com/usuario3"></textarea>
                         ''
                     );
 
+
                     if (
                         nestedUsername &&
                         nestedUsername.toLowerCase() === username.toLowerCase()
                     ) {
                         matchedUser ||= object.user;
+
 
                         if (object.stats && typeof object.stats === 'object') {
                             matchedStats ||= object.stats;
@@ -1906,12 +2825,14 @@ https://x.com/usuario3"></textarea>
                     }
                 }
 
+
                 const directUsername = clean(
                     object.uniqueId ||
                     object.unique_id ||
                     object.username ||
                     ''
                 );
+
 
                 if (
                     directUsername &&
@@ -1922,23 +2843,29 @@ https://x.com/usuario3"></textarea>
             });
         }
 
+
         return {
             user: matchedUser,
-            stats: matchedStats
+            stats: matchedStats,
+            notFound: explicitNotFound && !matchedUser
         };
     }
+
 
     /********************************************************************
      * THREADS
      ********************************************************************/
 
+
     function extractThreads() {
         const username = getUserFromUrl() || 'N/D';
+
 
         const description =
             metaContent('meta[property="og:description"]') ||
             metaContent('meta[name="description"]') ||
             '';
+
 
         const followers =
             rxFirst(description, [
@@ -1948,9 +2875,11 @@ https://x.com/usuario3"></textarea>
                 /([\d][\d.,\s]*(?:K|M|B|mil|millones)?)\s+(?:followers|seguidores)/i
             ]);
 
+
         const following =
             extractFollowingMetric(description) ||
             extractFollowingMetric(getBodyText());
+
 
         return {
             USUARIO: username,
@@ -1971,16 +2900,20 @@ https://x.com/usuario3"></textarea>
         };
     }
 
+
     /********************************************************************
      * REANUDACIÓN DESPUÉS DE NAVEGAR A /ABOUT
      ********************************************************************/
 
+
     async function resumePendingCapture() {
         const pending = getPending();
+
 
         if (!pending || pending.platform !== PLATFORM) {
             return false;
         }
+
 
         if (
             pending.stage === 'facebook-id-fallback' &&
@@ -1993,9 +2926,11 @@ https://x.com/usuario3"></textarea>
         ) {
             await waitForPage();
 
+
             const fromQueue = pending.fromQueue;
             const identity = pending.identity;
             clearPending();
+
 
             if (detectBlock()) {
                 pauseQueue();
@@ -2004,6 +2939,7 @@ https://x.com/usuario3"></textarea>
                 );
                 return true;
             }
+
 
             if (detectNotFound()) {
                 await commitRow(
@@ -2017,9 +2953,11 @@ https://x.com/usuario3"></textarea>
                 return true;
             }
 
+
             await captureCurrentProfile(fromQueue);
             return true;
         }
+
 
         if (
             pending.stage === 'x-about' &&
@@ -2029,6 +2967,7 @@ https://x.com/usuario3"></textarea>
         ) {
             await waitForPage();
 
+
             if (detectBlock()) {
                 pauseQueue();
                 clearPending();
@@ -2036,23 +2975,30 @@ https://x.com/usuario3"></textarea>
                 return true;
             }
 
+
             const mergedAboutData = mergeXAboutData(
                 pending.base,
                 await extractXAboutPageWithHistory()
             );
+
 
             clearPending();
             await commitRow(mergedAboutData, pending.fromQueue);
             return true;
         }
 
+
         if (
             pending.stage === 'facebook-about' &&
             PLATFORM === 'Facebook' &&
             isFacebookAboutPage() &&
-            sameIdentity(pending.identity, getFacebookIdentity())
+            (
+                sameIdentity(pending.identity, getFacebookIdentity()) ||
+                sameIdentity(pending.base?.['ID interno'], getFacebookIdentity())
+            )
         ) {
             await waitForPage();
+
 
             if (detectBlock()) {
                 pauseQueue();
@@ -2063,18 +3009,22 @@ https://x.com/usuario3"></textarea>
                 return true;
             }
 
+
             const finalData = mergeRows(
                 pending.base,
                 extractFacebookPage()
             );
+
 
             clearPending();
             await commitRow(finalData, pending.fromQueue);
             return true;
         }
 
+
         return false;
     }
+
 
     function savePending(data) {
         const pending = {
@@ -2082,21 +3032,22 @@ https://x.com/usuario3"></textarea>
             createdAt: Date.now()
         };
 
+
         GM_setValue(PENDING_KEY, JSON.stringify(pending));
     }
+
 
     function getPending() {
         try {
             const raw = GM_getValue(PENDING_KEY, '');
 
+
             if (!raw) return null;
+
 
             const pending = JSON.parse(raw);
 
-            /*
-             * Una captura pendiente caduca a los 15 minutos para evitar
-             * reutilizar datos de una navegación antigua.
-             */
+
             if (
                 !pending.createdAt ||
                 Date.now() - pending.createdAt > 15 * 60 * 1000
@@ -2105,6 +3056,7 @@ https://x.com/usuario3"></textarea>
                 return null;
             }
 
+
             return pending;
         } catch {
             clearPending();
@@ -2112,13 +3064,16 @@ https://x.com/usuario3"></textarea>
         }
     }
 
+
     function clearPending() {
         GM_deleteValue(PENDING_KEY);
     }
 
+
     /********************************************************************
      * COLA
      ********************************************************************/
+
 
     async function runAutoQueueSafely() {
         try {
@@ -2127,20 +3082,25 @@ https://x.com/usuario3"></textarea>
             console.error('[Roomba Scraper] Error en cola:', error);
             pauseQueue();
 
+
             setStatus(
                 `Cola pausada por error:\n${error.message || error}`
             );
         }
     }
 
+
     async function runAutoQueue() {
         const queue = getQueue();
 
+
         if (!queue.active || !queue.items.length) return;
+
 
         if (getPending()) {
             return;
         }
+
 
         if (detectBlock()) {
             pauseQueue();
@@ -2150,6 +3110,7 @@ https://x.com/usuario3"></textarea>
             return;
         }
 
+
         if (queue.index >= queue.items.length) {
             queue.active = false;
             saveQueue(queue);
@@ -2158,7 +3119,9 @@ https://x.com/usuario3"></textarea>
             return;
         }
 
+
         const item = queue.items[queue.index];
+
 
         if (!item?.url) {
             queue.index += 1;
@@ -2166,62 +3129,78 @@ https://x.com/usuario3"></textarea>
             return runAutoQueue();
         }
 
+
         if (!sameProfileTarget(item.url, location.href)) {
             setStatus(
                 `Abriendo perfil ${queue.index + 1}/${queue.items.length}:\n` +
                 `${item.label}`
             );
 
+
             setTimeout(() => {
                 location.href = item.url;
             }, 1300);
 
+
             return;
         }
+
 
         setStatus(
             `Capturando ${queue.index + 1}/${queue.items.length}:\n` +
             `${item.label}`
         );
 
+
         await sleep(randomInt(2500, 4500));
         await captureCurrentProfile(true);
     }
 
+
     async function advanceQueueAfterCommit(row) {
         const queue = getQueue();
 
+
         if (!queue.active || !queue.items.length) return;
 
+
         const currentItem = queue.items[queue.index];
+
 
         if (currentItem) {
             currentItem.status = row.EXISTE;
             currentItem.lastCapture = new Date().toISOString();
         }
 
+
         queue.index += 1;
+
 
         if (queue.index >= queue.items.length) {
             queue.active = false;
             saveQueue(queue);
 
+
             setStatus(
                 `Cola finalizada.\nFilas guardadas: ${getRows().length}`
             );
+
 
             updatePanelCounts();
             return;
         }
 
+
         saveQueue(queue);
         refreshQueueTextarea();
         updatePanelCounts();
+
 
         const seconds = randomInt(
             AUTO_MIN_SECONDS,
             AUTO_MAX_SECONDS
         );
+
 
         setStatus(
             `Perfil registrado.\n` +
@@ -2229,8 +3208,10 @@ https://x.com/usuario3"></textarea>
             `Pendientes: ${queue.items.length - queue.index}`
         );
 
+
         setTimeout(() => {
             const updatedQueue = getQueue();
+
 
             if (
                 updatedQueue.active &&
@@ -2242,20 +3223,26 @@ https://x.com/usuario3"></textarea>
         }, seconds * 1000);
     }
 
+
     function saveQueueFromTextarea(showConfirmation = true) {
         const raw = $('#falconai-queue-input')?.value || '';
+
 
         const lines = raw
             .split(/\r?\n/)
             .map(clean)
             .filter(Boolean);
 
+
         const items = [];
+
 
         for (const line of lines) {
             const url = toProfileUrl(line);
 
+
             if (!url) continue;
+
 
             items.push({
                 label: line,
@@ -2265,6 +3252,7 @@ https://x.com/usuario3"></textarea>
             });
         }
 
+
         saveQueue({
             active: false,
             index: 0,
@@ -2272,16 +3260,20 @@ https://x.com/usuario3"></textarea>
             items
         });
 
+
         if (showConfirmation) {
             setStatus(`Cola guardada: ${items.length} perfiles.`);
         }
 
+
         updatePanelCounts();
     }
+
 
     function getQueue() {
         try {
             const raw = GM_getValue(QUEUE_KEY, '');
+
 
             if (!raw) {
                 return {
@@ -2291,7 +3283,9 @@ https://x.com/usuario3"></textarea>
                 };
             }
 
+
             const queue = JSON.parse(raw);
+
 
             return {
                 active: Boolean(queue.active),
@@ -2309,9 +3303,11 @@ https://x.com/usuario3"></textarea>
         }
     }
 
+
     function saveQueue(queue) {
         GM_setValue(QUEUE_KEY, JSON.stringify(queue));
     }
+
 
     function pauseQueue() {
         const queue = getQueue();
@@ -2320,25 +3316,31 @@ https://x.com/usuario3"></textarea>
         updatePanelCounts();
     }
 
+
     function refreshQueueTextarea() {
         const element = $('#falconai-queue-input');
         if (!element) return;
 
+
         const queue = getQueue();
+
 
         element.value = queue.items
             .map(item => item.label || item.url)
             .join('\n');
     }
 
+
     /********************************************************************
      * ALMACENAMIENTO Y EXCEL
      ********************************************************************/
+
 
     function getRows() {
         try {
             const raw = GM_getValue(DATA_KEY, '[]');
             const parsed = JSON.parse(raw);
+
 
             return Array.isArray(parsed) ? parsed : [];
         } catch {
@@ -2346,26 +3348,50 @@ https://x.com/usuario3"></textarea>
         }
     }
 
+
     function saveRows(rows) {
         GM_setValue(DATA_KEY, JSON.stringify(rows));
     }
+
 
     function upsertOrAppend(row, replaceFields = []) {
         const rows = getRows();
         let action = 'Añadido';
 
+
         if (RECORD_MODE === 'upsert') {
             const key = rowKey(row);
-            const index = rows.findIndex(
-                existing => rowKey(existing) === key
-            );
+            const normalizedUser = normalizeText(row.USUARIO);
+            const normalizedType = normalizeText(row['TIPO DE OBJETO']);
+
+
+            const index = rows.findIndex(existing => {
+                if (rowKey(existing) === key) return true;
+
+
+                // Evitar duplicados si antes tenía ID = N/D y ahora tiene ID numérico (o viceversa)
+                if (
+                    isUsefulValue(normalizedUser) &&
+                    normalizeText(existing.PLATAFORMA || PLATFORM) === normalizeText(row.PLATAFORMA || PLATFORM) &&
+                    normalizeText(existing['TIPO DE OBJETO']) === normalizedType &&
+                    normalizeText(existing.USUARIO) === normalizedUser
+                ) {
+                    return true;
+                }
+
+
+                return false;
+            });
+
 
             if (index >= 0) {
                 rows[index] = mergeRows(rows[index], row);
 
+
                 for (const field of replaceFields) {
                     rows[index][field] = row[field];
                 }
+
 
                 action = 'Actualizado';
             } else {
@@ -2375,7 +3401,9 @@ https://x.com/usuario3"></textarea>
             rows.push(row);
         }
 
+
         saveRows(rows);
+
 
         return {
             action,
@@ -2383,28 +3411,42 @@ https://x.com/usuario3"></textarea>
         };
     }
 
-    function findExistingRow(username, type) {
+
+    function findExistingRow(username, type, internalId = '') {
         const normalizedUsername = normalizeText(username);
         const normalizedType = normalizeText(type);
+        const cleanedId = clean(internalId);
+
 
         return getRows().find(row => {
-            return (
-                normalizeText(row.USUARIO) === normalizedUsername &&
-                normalizeText(row['TIPO DE OBJETO']) === normalizedType
-            );
+            if (normalizeText(row['TIPO DE OBJETO']) !== normalizedType) {
+                return false;
+            }
+
+
+            if (isUsefulValue(cleanedId) && clean(row['ID interno']) === cleanedId) {
+                return true;
+            }
+
+
+            return normalizeText(row.USUARIO) === normalizedUsername;
         }) || null;
     }
 
+
     function exportHeaders() {
-        return HEADERS.map(exportHeaderLabel);
+        return getPlatformHeaders().map(exportHeaderLabel);
     }
+
 
     function exportHeaderLabel(header) {
         return PLATFORM_HEADER_LABELS[PLATFORM]?.[header] || header;
     }
 
+
     function exportCellValue(row, header) {
         if (header === 'OBSERVACIONES') return '';
+
 
         if (header === 'URL') {
             return isUsefulValue(row.URL)
@@ -2412,8 +3454,10 @@ https://x.com/usuario3"></textarea>
                 : 'N/D';
         }
 
+
         return String(row[header] ?? '');
     }
+
 
     function rawField(raw, header, aliases = []) {
         const candidates = [
@@ -2421,6 +3465,7 @@ https://x.com/usuario3"></textarea>
             exportHeaderLabel(header),
             ...aliases
         ];
+
 
         for (const candidate of candidates) {
             if (
@@ -2432,41 +3477,51 @@ https://x.com/usuario3"></textarea>
             }
         }
 
+
         return '';
     }
 
+
     function exportXlsx() {
         const rows = getRows();
+
 
         if (!rows.length) {
             setStatus('No hay filas para exportar.');
             return;
         }
 
+
         const XLSXLib =
             typeof XLSX !== 'undefined'
                 ? XLSX
                 : window.XLSX;
+
 
         if (!XLSXLib) {
             setStatus('No se ha cargado la librería XLSX.');
             return;
         }
 
-        const sortedRows = [...rows];
 
-        const visibleHeaders = exportHeaders();
+        const sortedRows = [...rows];
+        const activeHeaders = getPlatformHeaders();
+        const visibleHeaders = activeHeaders.map(exportHeaderLabel);
+
+
         const matrix = [
             visibleHeaders,
             ...sortedRows.map(row => {
-                return HEADERS.map(header => {
+                return activeHeaders.map(header => {
                     return exportCellValue(row, header);
                 });
             })
         ];
 
+
         const worksheet =
             XLSXLib.utils.aoa_to_sheet(matrix);
+
 
         sortedRows.forEach((row, index) => {
             const address = XLSXLib.utils.encode_cell({
@@ -2474,6 +3529,7 @@ https://x.com/usuario3"></textarea>
                 r: index + 1
             });
             const target = clean(row.URL);
+
 
             if (worksheet[address] && target && !/^N\/D$/i.test(target)) {
                 worksheet[address].l = {
@@ -2489,16 +3545,20 @@ https://x.com/usuario3"></textarea>
             }
         });
 
+
         sortedRows.forEach((row, index) => {
             if (normalizeText(row.EXISTE) !== 'no') return;
 
-            for (let columnIndex = 0; columnIndex < HEADERS.length; columnIndex += 1) {
+
+            for (let columnIndex = 0; columnIndex < activeHeaders.length; columnIndex += 1) {
                 const address = XLSXLib.utils.encode_cell({
                     c: columnIndex,
                     r: index + 1
                 });
 
+
                 if (!worksheet[address]) continue;
+
 
                 worksheet[address].s = {
                     ...(worksheet[address].s || {}),
@@ -2510,39 +3570,23 @@ https://x.com/usuario3"></textarea>
             }
         });
 
-        /*
-         * Todas las celdas se fuerzan a texto.
-         * Esto evita notación científica en IDs y conversiones de fecha.
-         */
+
         for (const address of Object.keys(worksheet)) {
             if (address.startsWith('!')) continue;
+
 
             worksheet[address].t = 's';
             worksheet[address].z = '@';
         }
 
-        worksheet['!cols'] = [
-            { wch: 48 },
-            { wch: 36 },
-            { wch: 28 },
-            { wch: 34 },
-            { wch: 25 },
-            { wch: 18 },
-            { wch: 18 },
-            { wch: 18 },
-            { wch: 15 },
-            { wch: 30 },
-            { wch: 28 },
-            { wch: 28 },
-            { wch: 32 },
-            { wch: 25 },
-            { wch: 12 },
-            { wch: 70 },
-            { wch: 17 },
-            { wch: 17 }
-        ];
+
+        worksheet['!cols'] = activeHeaders.map(header => ({
+            wch: COLUMN_WIDTHS[header] || 24
+        }));
+
 
         const workbook = XLSXLib.utils.book_new();
+
 
         XLSXLib.utils.book_append_sheet(
             workbook,
@@ -2550,15 +3594,21 @@ https://x.com/usuario3"></textarea>
             'perfiles'
         );
 
-        XLSXLib.writeFile(workbook, XLSX_NAME, {
+
+        const xlsxName = buildXlsxName();
+
+
+        XLSXLib.writeFile(workbook, xlsxName, {
             bookType: 'xlsx',
             cellStyles: true
         });
 
+
         setStatus(
-            `Excel exportado:\n${XLSX_NAME}\nFilas: ${rows.length}`
+            `Excel exportado:\n${xlsxName}\nFilas: ${rows.length}`
         );
     }
+
 
     async function importXlsx(file) {
         try {
@@ -2567,21 +3617,26 @@ https://x.com/usuario3"></textarea>
                     ? XLSX
                     : window.XLSX;
 
+
             if (!XLSXLib) {
                 throw new Error(
                     'No se ha cargado la librería XLSX.'
                 );
             }
 
+
             const buffer = await file.arrayBuffer();
+
 
             const workbook = XLSXLib.read(buffer, {
                 type: 'array',
                 cellDates: false
             });
 
+
             const worksheet =
                 workbook.Sheets[workbook.SheetNames[0]];
+
 
             const imported = XLSXLib.utils.sheet_to_json(
                 worksheet,
@@ -2591,27 +3646,33 @@ https://x.com/usuario3"></textarea>
                 }
             );
 
+
             const rows = getRows();
             let added = 0;
             let updated = 0;
 
+
             for (const importedRow of imported) {
                 const normalized = normalizeRow(importedRow);
+
 
                 if (normalized.PLATAFORMA !== PLATFORM) {
                     continue;
                 }
+
 
                 const key = rowKey(normalized);
                 const index = rows.findIndex(
                     row => rowKey(row) === key
                 );
 
+
                 if (index >= 0) {
                     rows[index] = mergeRows(
                         rows[index],
                         normalized
                     );
+
 
                     updated += 1;
                 } else {
@@ -2620,7 +3681,9 @@ https://x.com/usuario3"></textarea>
                 }
             }
 
+
             saveRows(rows);
+
 
             setStatus(
                 `Importación completada.\n` +
@@ -2629,9 +3692,11 @@ https://x.com/usuario3"></textarea>
                 `Total: ${rows.length}`
             );
 
+
             updatePanelCounts();
         } catch (error) {
             console.error('[Roomba Scraper] Error importando:', error);
+
 
             setStatus(
                 `Error importando el Excel:\n` +
@@ -2640,16 +3705,20 @@ https://x.com/usuario3"></textarea>
         }
     }
 
+
     /********************************************************************
      * NORMALIZACIÓN
      ********************************************************************/
 
+
     function normalizeRow(raw = {}) {
         const row = {};
+
 
         for (const header of HEADERS) {
             row[header] = '';
         }
+
 
         row.USUARIO = clean(
             rawField(raw, 'USUARIO') ||
@@ -2657,6 +3726,7 @@ https://x.com/usuario3"></textarea>
             getUserFromUrl() ||
             'N/D'
         ).replace(/^@/, '');
+
 
         row['NOMBRE VISIBLE'] = clean(
             rawField(raw, 'NOMBRE VISIBLE', [
@@ -2666,6 +3736,7 @@ https://x.com/usuario3"></textarea>
             raw.nombreVisible ||
             'N/D'
         );
+
 
         row['ID interno'] = clean(
             rawField(raw, 'ID interno', [
@@ -2680,6 +3751,7 @@ https://x.com/usuario3"></textarea>
             'N/D'
         );
 
+
         row['Nº SEGUIDORES'] = formatAudienceCount(
             rawField(raw, 'Nº SEGUIDORES', [
                 'FB: AMIGOS/MIEMBROS'
@@ -2689,6 +3761,7 @@ https://x.com/usuario3"></textarea>
             raw.miembros ||
             'N/D'
         );
+
 
         row['Nº SEGUIDOS'] = formatAudienceCount(
             rawField(raw, 'Nº SEGUIDOS', [
@@ -2705,11 +3778,13 @@ https://x.com/usuario3"></textarea>
             'N/D'
         );
 
+
         row['TIPO DE OBJETO'] = clean(
             rawField(raw, 'TIPO DE OBJETO') ||
             raw.tipo ||
             'PERFIL'
         ).toUpperCase();
+
 
         row.MÉTRICA = clean(
             rawField(raw, 'MÉTRICA') ||
@@ -2717,7 +3792,9 @@ https://x.com/usuario3"></textarea>
             'SEGUIDORES'
         ).toUpperCase();
 
+
         row.PLATAFORMA = PLATFORM;
+
 
         row['FECHA DE CREACIÓN DE CUENTA'] =
             normalizeDateField(
@@ -2731,6 +3808,7 @@ https://x.com/usuario3"></textarea>
                 'N/D'
             );
 
+
         row['UBICACIÓN DE LA CUENTA'] = clean(
             rawField(raw, 'UBICACIÓN DE LA CUENTA', [
                 'FB: UBICACIÓN DE LA CUENTA',
@@ -2741,6 +3819,7 @@ https://x.com/usuario3"></textarea>
             raw.ubicacion ||
             'N/D'
         );
+
 
         row['ÚLTIMO CAMBIO DE USUARIO'] =
             normalizeDateField(
@@ -2753,6 +3832,7 @@ https://x.com/usuario3"></textarea>
                 'N/D'
             );
 
+
         row['ÚLTIMA ACTUALIZACIÓN DEL PERFIL'] = clean(
             rawField(raw, 'ÚLTIMA ACTUALIZACIÓN DEL PERFIL', [
                 'FB: ÚLTIMA ACTUALIZACIÓN DEL PERFIL'
@@ -2760,6 +3840,7 @@ https://x.com/usuario3"></textarea>
             raw.ultimaActualizacionPerfil ||
             'N/D'
         );
+
 
         row['Nº CAMBIOS DE USUARIO'] = clean(
             rawField(raw, 'Nº CAMBIOS DE USUARIO', [
@@ -2770,30 +3851,32 @@ https://x.com/usuario3"></textarea>
             'N/D'
         );
 
+
         const existence = clean(
             rawField(raw, 'EXISTE') ||
             raw.existe ||
             'SI'
         ).toUpperCase();
 
+
         row.EXISTE = existence || 'SI';
+
 
         row.URL = clean(
             rawField(raw, 'URL') ||
             canonicalProfileUrl()
         );
 
-        /*
-         * Campo reservado para anotación manual. Las capturas nuevas lo
-         * dejan vacío; si se reimporta un XLSX cumplimentado, se conserva.
-         */
+
         row['Motivación del perfil'] = clean(
             rawField(raw, 'Motivación del perfil') ||
             raw.motivacionPerfil ||
             ''
         );
 
+
         row.OBSERVACIONES = '';
+
 
         row['GRUPO PÚBLICO'] = clean(
             rawField(raw, 'GRUPO PÚBLICO', [
@@ -2803,6 +3886,7 @@ https://x.com/usuario3"></textarea>
             'N/D'
         ).toUpperCase();
 
+
         row['GRUPO VISIBLE'] = clean(
             rawField(raw, 'GRUPO VISIBLE', [
                 'FB: GRUPO VISIBLE'
@@ -2810,6 +3894,7 @@ https://x.com/usuario3"></textarea>
             raw.grupoVisible ||
             'N/D'
         ).toUpperCase();
+
 
         for (const header of HEADERS) {
             if (
@@ -2820,39 +3905,49 @@ https://x.com/usuario3"></textarea>
                 continue;
             }
 
+
             row[header] = String(
                 row[header] === '' ? 'N/D' : row[header]
             );
         }
 
+
         return row;
     }
 
+
     function normalizeDateField(value) {
         const cleaned = clean(value);
+
 
         if (cleaned === '0' || cleaned === '-') {
             return cleaned;
         }
 
+
         if (!cleaned || /^N\/D$/i.test(cleaned)) {
             return 'N/D';
         }
 
+
         return formatMonthYearEs(cleaned);
     }
 
+
     function formatMonthYearEs(raw) {
         const value = clean(raw);
+
 
         if (!value || /^N\/D$/i.test(value)) {
             return 'N/D';
         }
 
+
         const normalized = normalizeText(value);
         const militaryMatch = normalized.match(
             /^(0[1-9]|[12]\d|3[01])(ene|feb|mar|abr|may|jun|jul|ago|sep|oct|nov|dic)((?:19|20|21)\d{2})$/i
         );
+
 
         if (militaryMatch) {
             return (
@@ -2862,9 +3957,11 @@ https://x.com/usuario3"></textarea>
             );
         }
 
+
         const militaryMonthMatch = normalized.match(
             /^(ene|feb|mar|abr|may|jun|jul|ago|sep|oct|nov|dic)((?:19|20|21)\d{2})$/i
         );
+
 
         if (militaryMonthMatch) {
             return (
@@ -2873,13 +3970,16 @@ https://x.com/usuario3"></textarea>
             );
         }
 
+
         const yearMatch = normalized.match(
             /\b(19\d{2}|20\d{2}|21\d{2})\b/
         );
 
+
         if (!yearMatch) {
             return 'N/D';
         }
+
 
         const monthDefinitions = [
             {
@@ -2950,6 +4050,7 @@ https://x.com/usuario3"></textarea>
             }
         ];
 
+
         for (const month of monthDefinitions) {
             const monthPattern = month.names
                 .map(escapeRegExp)
@@ -2967,6 +4068,7 @@ https://x.com/usuario3"></textarea>
                 )
             );
 
+
             if (
                 month.names.some(name => {
                     const pattern = new RegExp(
@@ -2974,14 +4076,17 @@ https://x.com/usuario3"></textarea>
                         'i'
                     );
 
+
                     return pattern.test(normalized);
                 })
             ) {
                 const day = dayBeforeMonth?.[1] || dayAfterMonth?.[1] || '';
 
+
                 if (day) {
                     return formatMilitaryDate(day, month.number, yearMatch[1]);
                 }
+
 
                 return formatMilitaryDate(
                     '01',
@@ -2991,9 +4096,11 @@ https://x.com/usuario3"></textarea>
             }
         }
 
+
         const isoMatch = normalized.match(
             /\b((?:19|20|21)\d{2})[-/](0[1-9]|1[0-2])(?:[-/](0?[1-9]|[12]\d|3[01]))?\b/
         );
+
 
         if (isoMatch) {
             return isoMatch[3]
@@ -3005,9 +4112,11 @@ https://x.com/usuario3"></textarea>
                 ).slice(2);
         }
 
+
         const europeanMatch = normalized.match(
             /\b(0?[1-9]|[12]\d|3[01])[-/](0?[1-9]|1[0-2])[-/]((?:19|20|21)\d{2})\b/
         );
+
 
         if (europeanMatch) {
             return formatMilitaryDate(
@@ -3017,26 +4126,39 @@ https://x.com/usuario3"></textarea>
             );
         }
 
+
+        // Si Facebook u otra red ofrece únicamente el año (ej. "Se unió en 2016"), devolver el año
+        if (/^(?:en\s+|in\s+|del?\s+)?(19\d{2}|20\d{2}|21\d{2})$/i.test(normalized)) {
+            return yearMatch[1];
+        }
+
+
         return 'N/D';
     }
+
 
     function formatEpochMonthYearEs(value) {
         if (value === undefined || value === null || value === '') {
             return 'N/D';
         }
 
+
         const numeric = Number(value);
+
 
         if (!Number.isFinite(numeric) || numeric <= 0) {
             return 'N/D';
         }
+
 
         const milliseconds =
             numeric < 100000000000
                 ? numeric * 1000
                 : numeric;
 
+
         const date = new Date(milliseconds);
+
 
         if (
             Number.isNaN(date.getTime()) ||
@@ -3046,6 +4168,7 @@ https://x.com/usuario3"></textarea>
             return 'N/D';
         }
 
+
         return formatMilitaryDate(
             date.getUTCDate(),
             date.getUTCMonth() + 1,
@@ -3053,21 +4176,27 @@ https://x.com/usuario3"></textarea>
         );
     }
 
+
     function formatAudienceCount(value) {
         const original = clean(value);
+
 
         if (!original || /^N\/D$/i.test(original)) {
             return 'N/D';
         }
 
+
         const normalized = normalizeText(original)
             .replace(/\s+/g, '');
+
 
         const match = normalized.match(
             /^([\d.,]+)(k|m|b|mil|mill|millon|millones)?$/i
         );
 
+
         if (!match) return original;
+
 
         const suffix = (match[2] || '').toLowerCase();
         const numeric = parseAudienceNumber(
@@ -3075,7 +4204,9 @@ https://x.com/usuario3"></textarea>
             Boolean(suffix)
         );
 
+
         if (!Number.isFinite(numeric)) return original;
+
 
         const multiplier =
             suffix === 'k' || suffix === 'mil'
@@ -3089,23 +4220,29 @@ https://x.com/usuario3"></textarea>
                         ? 1_000_000_000
                         : 1;
 
+
         const absolute = numeric * multiplier;
+
 
         if (absolute >= 1_000_000) {
             return `${formatCompactCount(absolute / 1_000_000)} millones`;
         }
 
+
         if (absolute >= 1_000) {
             return `${formatCompactCount(absolute / 1_000)} mil`;
         }
 
+
         return String(Math.round(absolute));
     }
+
 
     function parseAudienceNumber(value, hasSuffix) {
         let textValue = String(value || '');
         const dots = (textValue.match(/\./g) || []).length;
         const commas = (textValue.match(/,/g) || []).length;
+
 
         if (dots && commas) {
             const decimalSeparator =
@@ -3113,9 +4250,11 @@ https://x.com/usuario3"></textarea>
                     ? '.'
                     : ',';
 
+
             const thousandsSeparator = decimalSeparator === '.'
                 ? ','
                 : '.';
+
 
             textValue = textValue
                 .replace(new RegExp(`\\${thousandsSeparator}`, 'g'), '')
@@ -3126,6 +4265,7 @@ https://x.com/usuario3"></textarea>
             const separator = dots === 1 ? '.' : ',';
             const decimals = textValue.split(separator)[1]?.length || 0;
 
+
             if (!hasSuffix && decimals === 3) {
                 textValue = textValue.replace(separator, '');
             } else {
@@ -3133,14 +4273,17 @@ https://x.com/usuario3"></textarea>
             }
         }
 
+
         return Number(textValue);
     }
+
 
     function formatCompactCount(value) {
         return Number(value.toFixed(2))
             .toString()
             .replace('.', ',');
     }
+
 
     function formatMilitaryDate(day, month, year) {
         const monthAbbreviations = {
@@ -3160,40 +4303,28 @@ https://x.com/usuario3"></textarea>
         const monthKey = String(month).padStart(2, '0');
         const monthText = monthAbbreviations[monthKey];
 
+
         if (!monthText) {
             return 'N/D';
         }
 
+
         return `${String(day).padStart(2, '0')}${monthText}${year}`;
     }
 
-    function monthNumberToSpanish(number) {
-        const months = {
-            '01': 'Enero',
-            '02': 'Febrero',
-            '03': 'Marzo',
-            '04': 'Abril',
-            '05': 'Mayo',
-            '06': 'Junio',
-            '07': 'Julio',
-            '08': 'Agosto',
-            '09': 'Septiembre',
-            '10': 'Octubre',
-            '11': 'Noviembre',
-            '12': 'Diciembre'
-        };
-
-        return months[
-            String(number).padStart(2, '0')
-        ] || 'N/D';
-    }
 
     /********************************************************************
      * LOCALIZACIÓN DE IDs INTERNOS
      ********************************************************************/
 
+
     function findXInternalId(username) {
         if (!username) return 'N/D';
+
+
+        const identifierFromScripts = findXIdentifierInScripts(username);
+        if (identifierFromScripts) return identifierFromScripts;
+
 
         const bodyId = isXAboutPage()
             ? rxFirst(getBodyText(), [
@@ -3201,11 +4332,15 @@ https://x.com/usuario3"></textarea>
             ])
             : '';
 
+
         if (bodyId) return bodyId;
+
 
         const stateId = findXIdInReactState(username);
 
+
         if (stateId) return stateId;
+
 
         const attributedElement = Array.from(document.querySelectorAll(
             '[data-user-id],[data-rest-id],[data-userid]'
@@ -3214,11 +4349,13 @@ https://x.com/usuario3"></textarea>
                 'header,article,[data-testid="UserName"]'
             );
 
+
             return containsExactProfileHandle(
                 context?.textContent || '',
                 username
             );
         });
+
 
         if (attributedElement) {
             const attributedId =
@@ -3227,14 +4364,29 @@ https://x.com/usuario3"></textarea>
                 attributedElement.getAttribute('data-userid') ||
                 '';
 
+
             if (/^\d{5,}$/.test(attributedId)) {
                 return attributedId;
             }
         }
 
+
+        const allUserLinks = Array.from(document.querySelectorAll('a[href]'))
+            .map(link => (link.getAttribute('href') || '').match(
+                /\/i\/user\/(\d{5,})/i
+            ))
+            .filter(Boolean);
+
+
+        if (allUserLinks.length) {
+            return allUserLinks[0][1];
+        }
+
+
         const userLink = Array.from(document.querySelectorAll('a[href]'))
             .filter(link => {
                 const context = link.closest('header,article');
+
 
                 return containsExactProfileHandle(
                     context?.textContent || '',
@@ -3242,11 +4394,13 @@ https://x.com/usuario3"></textarea>
                 );
             })
             .map(link => (link.getAttribute('href') || '').match(
-                /(?:[?&]user_id=|\/i\/user\/)(\d{5,})/i
+                /[?&]user_id=(\d{5,})/i
             ))
             .find(Boolean);
 
+
         if (userLink?.[1]) return userLink[1];
+
 
         const id = findEmbeddedIdForIdentity(
             username,
@@ -3263,23 +4417,98 @@ https://x.com/usuario3"></textarea>
             ]
         );
 
+
         return id || 'N/D';
     }
 
+
+    function findXIdentifierInScripts(username) {
+        const target = clean(username).replace(/^@/, '');
+        if (!target) return '';
+
+
+        const sources = getEmbeddedTextSources();
+
+
+        for (const source of sources) {
+            for (const variant of embeddedSourceVariants(source)) {
+                const identifierPattern = /"identifier"\s*:\s*"(\d{5,})"/gi;
+                let match;
+
+
+                while ((match = identifierPattern.exec(variant)) !== null) {
+                    const candidateId = match[1];
+                    const windowStart = Math.max(0, match.index - 2000);
+                    const windowEnd   = Math.min(variant.length, match.index + match[0].length + 2000);
+                    const window      = variant.slice(windowStart, windowEnd);
+
+
+                    if (
+                        containsExactProfileHandle(window, target) ||
+                        new RegExp(`"(?:screen_name|username|screenName)"\\s*:\\s*"${escapeRegExp(target)}"`, 'i').test(window) ||
+                        new RegExp(`(?:x|twitter)\\.com\\/${escapeRegExp(target)}(?:\\/|[?#]|$)`, 'i').test(window)
+                    ) {
+                        return candidateId;
+                    }
+                }
+
+
+                const markerPattern = new RegExp(
+                    `"(?:screen_name|username)"\\s*:\\s*"${escapeRegExp(target)}"`,
+                    'gi'
+                );
+
+
+                while ((match = markerPattern.exec(variant)) !== null) {
+                    const openings = findOpenJsonObjects(variant, match.index);
+
+
+                    for (let index = openings.length - 1; index >= 0; index -= 1) {
+                        const obj = parseJsonObjectAt(variant, openings[index]);
+
+
+                        if (!obj) continue;
+
+
+                        const identifier = clean(
+                            obj.identifier ||
+                            obj.id_str ||
+                            obj.rest_id ||
+                            ''
+                        );
+
+
+                        if (/^\d{5,}$/.test(identifier)) {
+                            return identifier;
+                        }
+                    }
+                }
+            }
+        }
+
+
+        return '';
+    }
+
+
     function findInstagramPageScopedId(username) {
         if (!sameIdentity(getUserFromUrl(), username)) return '';
+
 
         const ownerMeta = document.querySelector(
             'meta[property="instapp:owner_user_id"][content],meta[name="instapp:owner_user_id"][content]'
         );
         const ownerId = clean(ownerMeta?.getAttribute('content') || '');
 
+
         if (/^\d{5,}$/.test(ownerId)) {
             return ownerId;
         }
 
+
         const loggingIds = new Set();
         const profilePageIds = new Set();
+
 
         for (const source of getEmbeddedTextSources()) {
             for (const variant of embeddedSourceVariants(source)) {
@@ -3288,11 +4517,13 @@ https://x.com/usuario3"></textarea>
                     /logging_page_id(?:\\"|&quot;)?\s*[:=]\s*(?:\\"|&quot;|"|')?profilePage_(\d{5,})/gi
                 ];
 
+
                 for (const pattern of loggingPatterns) {
                     for (const match of variant.matchAll(pattern)) {
                         loggingIds.add(match[1]);
                     }
                 }
+
 
                 for (const match of variant.matchAll(
                     /\bprofilePage_(\d{5,})\b/gi
@@ -3304,6 +4535,7 @@ https://x.com/usuario3"></textarea>
                             match.index + match[0].length + 5000
                         )
                     );
+
 
                     if (
                         instagramSourceHasExactIdentity(
@@ -3317,29 +4549,27 @@ https://x.com/usuario3"></textarea>
             }
         }
 
-        /*
-         * logging_page_id identifica la página de perfil abierta. Se acepta
-         * únicamente si todas sus apariciones coinciden en un solo ID.
-         */
+
         if (loggingIds.size === 1) {
             return [...loggingIds][0];
         }
 
-        /*
-         * Algunas versiones omiten la clave y conservan profilePage_ID.
-         * Sólo se usa cuando hay un único candidato en toda la página.
-         */
+
         if (loggingIds.size === 0 && profilePageIds.size === 1) {
             return [...profilePageIds][0];
         }
 
+
         return '';
     }
+
 
     function instagramSourceHasExactIdentity(source, username) {
         const target = clean(username).replace(/^@/, '');
 
+
         if (!target) return false;
+
 
         const escaped = escapeRegExp(target);
         const patterns = [
@@ -3361,8 +4591,10 @@ https://x.com/usuario3"></textarea>
             )
         ];
 
+
         return patterns.some(pattern => pattern.test(String(source || '')));
     }
+
 
     function findXIdInReactState(username) {
         const normalizedUsername = normalizeText(username);
@@ -3373,29 +4605,33 @@ https://x.com/usuario3"></textarea>
                 .includes(normalizedUsername);
         });
 
+
         const roots = [];
+
 
         for (const element of usernameElements.slice(0, 8)) {
             let current = element;
+
 
             for (let level = 0; current && level < 6; level += 1) {
                 for (const key of Object.getOwnPropertyNames(current)) {
                     if (/^__react(?:Props|Fiber|Container)/i.test(key)) {
                         try {
                             roots.push(current[key]);
-                        } catch {
-                            // Algunas propiedades internas no son accesibles.
-                        }
+                        } catch {}
                     }
                 }
+
 
                 current = current.parentElement;
             }
         }
 
+
         const visited = new WeakSet();
         let inspected = 0;
         let found = '';
+
 
         function visit(value, depth) {
             if (
@@ -3409,12 +4645,15 @@ https://x.com/usuario3"></textarea>
                 return;
             }
 
+
             visited.add(value);
             inspected += 1;
+
 
             const legacy = value.legacy && typeof value.legacy === 'object'
                 ? value.legacy
                 : null;
+
 
             const candidateUsername = clean(
                 value.screen_name ||
@@ -3423,6 +4662,7 @@ https://x.com/usuario3"></textarea>
                 legacy?.screen_name ||
                 ''
             ).replace(/^@/, '');
+
 
             if (sameIdentity(candidateUsername, username)) {
                 const candidateId = clean(
@@ -3433,16 +4673,19 @@ https://x.com/usuario3"></textarea>
                     ''
                 );
 
+
                 if (/^\d{5,}$/.test(candidateId)) {
                     found = candidateId;
                     return;
                 }
             }
 
+
             if (Array.isArray(value)) {
                 for (const item of value) visit(item, depth + 1);
                 return;
             }
+
 
             for (const key of Object.keys(value)) {
                 if (
@@ -3453,45 +4696,148 @@ https://x.com/usuario3"></textarea>
                     continue;
                 }
 
+
                 try {
                     visit(value[key], depth + 1);
-                } catch {
-                    // Se ignoran getters internos que lancen una excepción.
-                }
+                } catch {}
             }
         }
+
 
         for (const root of roots) {
             visit(root, 0);
             if (found) break;
         }
 
+
         return found;
     }
+
 
     function findInstagramInternalId(username) {
         if (!username) return 'N/D';
 
-        const id = findEmbeddedIdForIdentity(
+
+        const target = clean(username).replace(/^@/, '');
+
+
+        const ownerMeta = document.querySelector(
+            'meta[property="instapp:owner_user_id"][content],' +
+            'meta[name="instapp:owner_user_id"][content]'
+        );
+        const metaId = clean(ownerMeta?.getAttribute('content') || '');
+        if (/^\d{5,}$/.test(metaId)) return metaId;
+
+
+        const sources = getEmbeddedTextSources();
+
+
+        for (const source of sources) {
+            for (const variant of embeddedSourceVariants(source)) {
+                const pkPattern = /"pk"\s*:\s*"?(\d{5,})"?/gi;
+                let match;
+
+
+                while ((match = pkPattern.exec(variant)) !== null) {
+                    const candidateId = match[1];
+                    const windowStart = Math.max(0, match.index - 3000);
+                    const windowEnd   = Math.min(variant.length, match.index + match[0].length + 3000);
+                    const window      = variant.slice(windowStart, windowEnd);
+
+
+                    if (instagramSourceHasExactIdentity(window, target)) {
+                        return candidateId;
+                    }
+                }
+
+
+                const usernameMarker = new RegExp(
+                    `"username"\\s*:\\s*"${escapeRegExp(target)}"`,
+                    'gi'
+                );
+
+
+                while ((match = usernameMarker.exec(variant)) !== null) {
+                    const openings = findOpenJsonObjects(variant, match.index);
+
+
+                    for (let index = openings.length - 1; index >= 0; index -= 1) {
+                        const obj = parseJsonObjectAt(variant, openings[index]);
+
+
+                        if (!obj) continue;
+
+
+                        const candidateId = clean(
+                            obj.pk ||
+                            obj.id ||
+                            obj.user_id ||
+                            obj.profile_id ||
+                            obj.owner?.id ||
+                            obj.user?.pk ||
+                            obj.user?.id ||
+                            ''
+                        );
+
+
+                        if (/^\d{5,}$/.test(candidateId)) {
+                            return candidateId;
+                        }
+                    }
+                }
+
+
+                const profilePagePattern = /\bprofilePage_(\d{5,})\b/gi;
+
+
+                while ((match = profilePagePattern.exec(variant)) !== null) {
+                    const candidateId = match[1];
+                    const windowStart = Math.max(0, match.index - 4000);
+                    const windowEnd   = Math.min(variant.length, match.index + match[0].length + 4000);
+                    const window      = variant.slice(windowStart, windowEnd);
+
+
+                    if (instagramSourceHasExactIdentity(window, target)) {
+                        return candidateId;
+                    }
+                }
+
+
+                const ownerPattern = /"owner"\s*:\s*\{[^}]{0,200}"id"\s*:\s*"(\d{5,})"/gi;
+
+
+                while ((match = ownerPattern.exec(variant)) !== null) {
+                    const candidateId = match[1];
+                    const windowStart = Math.max(0, match.index - 3000);
+                    const windowEnd   = Math.min(variant.length, match.index + match[0].length + 3000);
+                    const window      = variant.slice(windowStart, windowEnd);
+
+
+                    if (instagramSourceHasExactIdentity(window, target)) {
+                        return candidateId;
+                    }
+                }
+            }
+        }
+
+
+        const embeddedId = findEmbeddedIdForIdentity(
             username,
-            [
-                'username'
-            ],
-            [
-                'id',
-                'pk',
-                'user_id',
-                'profile_id'
-            ]
+            ['username'],
+            ['id', 'pk', 'user_id', 'profile_id']
         );
 
-        if (id) return id;
+
+        if (embeddedId) return embeddedId;
+
 
         return findInstagramPageScopedId(username) || 'N/D';
     }
 
+
     function findThreadsInternalId(username) {
         if (!username) return 'N/D';
+
 
         return findEmbeddedIdForIdentity(
             username,
@@ -3506,20 +4852,40 @@ https://x.com/usuario3"></textarea>
         ) || 'N/D';
     }
 
+
+    function getLoggedInFacebookUserId() {
+        const cookieMatch = document.cookie.match(/(?:^|;\s*)c_user=(\d{5,})/);
+        if (cookieMatch?.[1]) return cookieMatch[1];
+
+
+        const html = getHtml();
+        const initMatch = html.match(/"CurrentUserInitialData"\s*,\s*\[\]\s*,\s*\{[^}]*"USER_ID"\s*:\s*"(\d{5,})"/i);
+        return initMatch?.[1] || '';
+    }
+
+
     function findFacebookInternalId(type) {
+        const mySessionId = getLoggedInFacebookUserId();
+
+
+        // 1. URL directa (casos inequívocos)
         try {
             const url = new URL(location.href);
 
+
             if (type === 'GRUPO') {
                 const groupMatch =
-                    url.pathname.match(/^\/groups\/(\d+)/i);
+                    url.pathname.match(/^\/groups\/(\d{5,})/i);
+
 
                 if (groupMatch?.[1]) {
                     return groupMatch[1];
                 }
             }
 
+
             const queryId = url.searchParams.get('id');
+
 
             if (
                 type !== 'GRUPO' &&
@@ -3530,45 +4896,259 @@ https://x.com/usuario3"></textarea>
                 return queryId;
             }
 
+
             const peopleId = decodeURIComponent(url.pathname).match(
                 /^\/people\/[^/]+\/(\d{5,})/i
             )?.[1];
 
+
             if (peopleId) {
                 return peopleId;
             }
-        } catch {
-            // Se continúa con HTML embebido.
-        }
+        } catch {}
 
-        const metadataId = findFacebookPageMetadataId(type);
 
+        // 2. Metadatos de la página (canonical, og:url, al:android:url, al:ios:url)
+        const metadataId = findFacebookPageMetadataId(type, mySessionId);
         if (metadataId) return metadataId;
 
+
+        // 3. Búsqueda en el código fuente (Comet routes, GraphQL, userID, delegate_page_id)
+        const sourceId = findFacebookUserIdInSource(type, mySessionId);
+        if (sourceId) return sourceId;
+
+
+        // 4. Enlaces del DOM propios de la cabecera del perfil (álbumes pb.<ID>, fotos, profile.php?id=)
+        if (type !== 'GRUPO') {
+            const domId = findFacebookIdInDomLinks(mySessionId);
+            if (domId) return domId;
+        }
+
+
+        // 5. JSON embebido genérico asociado al nombre/vanity
         const identity = type === 'GRUPO'
             ? getFacebookGroupIdFromUrl() || getFacebookIdentity()
             : getFacebookProfileUsername();
 
+
         if (!identity) return 'N/D';
 
-        return findEmbeddedIdForIdentity(
+
+        const embeddedId = findEmbeddedIdForIdentity(
             identity,
             type === 'GRUPO'
                 ? ['username', 'vanity', 'slug', 'group_name']
-                : ['username', 'vanity', 'vanity_name'],
+                : ['username', 'vanity', 'vanity_name', 'userVanity'],
             type === 'GRUPO'
                 ? ['groupID', 'group_id', 'entity_id', 'id']
                 : [
                     'profile_id',
                     'userID',
                     'actorID',
+                    'delegate_page_id',
+                    'pageID',
                     'entity_id',
                     'id'
                 ]
-        ) || 'N/D';
+        );
+
+
+        if (embeddedId && embeddedId !== mySessionId) {
+            return embeddedId;
+        }
+
+
+        return 'N/D';
     }
 
-    function findFacebookPageMetadataId(type) {
+
+    function findFacebookUserIdInSource(type, mySessionId = '') {
+        const sources = getEmbeddedTextSources();
+
+
+        const profileIdKeys = [
+            '"userID"',
+            '"UserID"',
+            '"user_id"',
+            '"profile_id"',
+            '"delegate_page_id"',
+            '"pageID"',
+            '"actorID"',
+            '"ownerID"',
+            '"owner_id"',
+            '"target_id"',
+            '"selected_item_id"'
+        ];
+
+
+        const groupIdKeys = [
+            '"groupID"',
+            '"GroupID"',
+            '"group_id"',
+            '"entity_id"'
+        ];
+
+
+        const targetKeys = type === 'GRUPO' ? groupIdKeys : profileIdKeys;
+
+
+        // 1ª pasada: coincidencia estricta con el nombre/vanity o bloque Comet de ruta del perfil
+        for (const source of sources) {
+            for (const variant of embeddedSourceVariants(source)) {
+                // Patrones específicos de ruta Comet de Facebook (muy alta fiabilidad incluso sin vanity cerca)
+                if (type !== 'GRUPO') {
+                    const cometRoutePatterns = [
+                        /"tracePolicy"\s*:\s*"comet\.profile\.[^"]+"[\s\S]{0,1200}?"(?:userID|profile_id|delegate_page_id|entity_id)"\s*:\s*"?(\d{5,})"?/gi,
+                        /"(?:userID|profile_id|delegate_page_id|entity_id)"\s*:\s*"?(\d{5,})"?[\s\S]{0,1200}?"tracePolicy"\s*:\s*"comet\.profile\.[^"]+"/gi,
+                        /"profile_owner"\s*:\s*\{[^}]{0,250}?"id"\s*:\s*"(\d{5,})"/gi,
+                        /"ProfileCometHeader[^"]*"[\s\S]{0,1000}?"(?:userID|profileID|id)"\s*:\s*"(\d{5,})"/gi
+                    ];
+
+
+                    for (const rtPattern of cometRoutePatterns) {
+                        let rtMatch;
+                        while ((rtMatch = rtPattern.exec(variant)) !== null) {
+                            const candidate = rtMatch[1];
+                            if (candidate && candidate !== mySessionId) {
+                                return candidate;
+                            }
+                        }
+                    }
+                }
+
+
+                for (const key of targetKeys) {
+                    const pattern = new RegExp(
+                        `${escapeRegExp(key)}\\s*:\\s*"?(\\d{5,})"?`,
+                        'g'
+                    );
+
+
+                    let match;
+
+
+                    while ((match = pattern.exec(variant)) !== null) {
+                        const candidateId = match[1];
+                        if (candidateId === mySessionId) continue;
+
+
+                        const windowStart = Math.max(0, match.index - 3500);
+                        const windowEnd   = Math.min(
+                            variant.length,
+                            match.index + match[0].length + 3500
+                        );
+                        const window = variant.slice(windowStart, windowEnd);
+
+
+                        if (facebookSourceMatchesCurrentProfile(window, type)) {
+                            return candidateId;
+                        }
+                    }
+                }
+            }
+        }
+
+
+        return '';
+    }
+
+
+    function findFacebookIdInDomLinks(mySessionId = '') {
+        const scope = document.querySelector('[role="main"]') || document.body;
+        if (!scope) return '';
+
+
+        const links = Array.from(scope.querySelectorAll('a[href]'));
+
+
+        for (const link of links) {
+            if (link.closest('[role="article"]')) continue;
+            const href = link.getAttribute('href') || '';
+
+
+            // Enlaces de álbumes de perfil: set=pb.<USER_ID>.-2207520000 o set=a.<ID>.<ID>.<USER_ID>
+            const pbMatch = href.match(/[?&]set=pb\.(\d{5,})\./i);
+            if (pbMatch?.[1] && pbMatch[1] !== mySessionId) {
+                return pbMatch[1];
+            }
+
+
+            const profilePhpMatch = href.match(/profile\.php\?id=(\d{5,})/i);
+            if (profilePhpMatch?.[1] && profilePhpMatch[1] !== mySessionId) {
+                return profilePhpMatch[1];
+            }
+        }
+
+
+        return '';
+    }
+
+
+    function facebookSourceMatchesCurrentProfile(source, type) {
+        try {
+            const url = new URL(location.href);
+
+
+            if (type === 'GRUPO') {
+                const groupId = getFacebookGroupIdFromUrl();
+
+
+                if (groupId) {
+                    if (/^\d{5,}$/.test(groupId)) {
+                        return source.includes(groupId);
+                    }
+
+
+                    return new RegExp(
+                        `"(?:vanity|slug|username|group_name)"\\s*:\\s*"${escapeRegExp(groupId)}"`,
+                        'i'
+                    ).test(source);
+                }
+            }
+
+
+            const queryId = url.searchParams.get('id');
+
+
+            if (url.pathname.startsWith('/profile.php') && queryId) {
+                return source.includes(queryId);
+            }
+
+
+            const username = getFacebookProfileUsername();
+
+
+            if (username) {
+                const escaped = escapeRegExp(username);
+                if (
+                    new RegExp(`"(?:vanity|vanity_name|userVanity|username|login|profile_url|url)"\\s*:\\s*"[^"]*${escaped}[^"]*"`, 'i').test(source) ||
+                    source.includes(`facebook.com/${username}`) ||
+                    source.includes(`/${username}"`) ||
+                    new RegExp(`(?:^|[^a-z0-9._])${escaped}(?:$|[^a-z0-9._])`, 'i').test(source)
+                ) {
+                    return true;
+                }
+            }
+
+
+            // También aceptar si el bloque contiene el nombre visible exacto del perfil (H1)
+            const displayName = extractFacebookDisplayName();
+            if (displayName && displayName.length >= 3) {
+                const escapedName = escapeRegExp(displayName);
+                if (new RegExp(`"name"\\s*:\\s*"${escapedName}"`, 'i').test(source)) {
+                    return true;
+                }
+            }
+
+
+            return false;
+        } catch {
+            return false;
+        }
+    }
+
+
+    function findFacebookPageMetadataId(type, mySessionId = '') {
         const values = [
             location.href,
             ...Array.from(document.querySelectorAll(
@@ -3580,30 +5160,37 @@ https://x.com/usuario3"></textarea>
             })
         ];
 
+
         const patterns = type === 'GRUPO'
             ? [
                 /\/groups\/(\d{5,})/i,
-                /(?:group_id|groupID)[=/:](\d{5,})/i
+                /(?:fb:\/\/group\/|group_id[=/:]|groupID[=/:])(\d{5,})/i
             ]
             : [
                 /profile\.php\?[^#]*\bid=(\d{5,})/i,
                 /\/people\/[^/]+\/(\d{5,})/i,
-                /(?:fb:\/\/profile\/|profile_id[=/:])(\d{5,})/i
+                /(?:fb:\/\/(?:profile|page)\/(?:\?id=)?|profile_id[=/:]|page_id[=/:])(\d{5,})/i
             ];
+
 
         for (const value of values) {
             const id = rxFirst(String(value || ''), patterns);
 
-            if (id) return id;
+
+            if (id && id !== mySessionId) return id;
         }
+
 
         return '';
     }
 
+
     function containsExactProfileHandle(source, username) {
         const handle = clean(username).replace(/^@/, '');
 
+
         if (!handle) return false;
+
 
         return new RegExp(
             `(^|[^a-z0-9_])@${escapeRegExp(handle)}(?=$|[^a-z0-9_])`,
@@ -3611,11 +5198,7 @@ https://x.com/usuario3"></textarea>
         ).test(String(source || ''));
     }
 
-    /*
-     * Devuelve un ID sólo cuando el mismo objeto de datos contiene la
-     * identidad exacta del perfil visitado. Nunca acepta el primer ID global
-     * del HTML, porque puede ser el usuario que mantiene abierta la sesión.
-     */
+
     function findEmbeddedIdForIdentity(
         username,
         identityKeys,
@@ -3623,7 +5206,9 @@ https://x.com/usuario3"></textarea>
     ) {
         const target = clean(username).replace(/^@/, '');
 
+
         if (!target) return '';
+
 
         for (const root of getEmbeddedJsonRoots()) {
             const id = findEntityIdInObjectTree(
@@ -3633,10 +5218,13 @@ https://x.com/usuario3"></textarea>
                 idKeys
             );
 
+
             if (id) return id;
         }
 
+
         const encodedTarget = JSON.stringify(target).slice(1, -1);
+
 
         for (const source of getEmbeddedTextSources()) {
             for (const variant of embeddedSourceVariants(source)) {
@@ -3648,11 +5236,13 @@ https://x.com/usuario3"></textarea>
                     let match;
                     let inspected = 0;
 
+
                     while ((match = marker.exec(variant)) && inspected < 20) {
                         const openings = findOpenJsonObjects(
                             variant,
                             match.index
                         );
+
 
                         for (
                             let index = openings.length - 1;
@@ -3664,7 +5254,9 @@ https://x.com/usuario3"></textarea>
                                 openings[index]
                             );
 
+
                             if (!object) continue;
+
 
                             const id = findEntityIdInObjectTree(
                                 object,
@@ -3673,8 +5265,10 @@ https://x.com/usuario3"></textarea>
                                 idKeys
                             );
 
+
                             if (id) return id;
                         }
+
 
                         inspected += 1;
                     }
@@ -3682,55 +5276,64 @@ https://x.com/usuario3"></textarea>
             }
         }
 
+
         return '';
     }
 
+
     function getEmbeddedJsonRoots() {
         const roots = [];
+
 
         for (const source of getEmbeddedTextSources()) {
             for (const variant of embeddedSourceVariants(source)) {
                 const trimmed = variant.trim();
 
+
                 if (!/^[\[{]/.test(trimmed)) continue;
+
 
                 try {
                     const parsed = JSON.parse(trimmed);
 
+
                     if (parsed && typeof parsed === 'object') {
                         roots.push(parsed);
                     }
-                } catch {
-                    // Otros scripts se inspeccionan mediante objetos locales.
-                }
+                } catch {}
             }
         }
 
+
         return roots;
     }
+
 
     function embeddedSourceVariants(source) {
         const original = String(source || '');
         const variants = [original];
 
+
         if (original.includes('&quot;')) {
             variants.push(decodeHtml(original));
         }
+
 
         if (original.includes('\\"')) {
             variants.push(original.replace(/\\"/g, '"'));
         }
 
+
         if (original.includes('%22')) {
             try {
                 variants.push(decodeURIComponent(original));
-            } catch {
-                // Se conserva la fuente original.
-            }
+            } catch {}
         }
+
 
         return [...new Set(variants)];
     }
+
 
     function findEntityIdInObjectTree(
         root,
@@ -3740,6 +5343,7 @@ https://x.com/usuario3"></textarea>
     ) {
         const visited = new WeakSet();
         let inspected = 0;
+
 
         function visit(value, depth) {
             if (
@@ -3752,14 +5356,18 @@ https://x.com/usuario3"></textarea>
                 return '';
             }
 
+
             visited.add(value);
             inspected += 1;
+
 
             if (objectHasExactIdentity(value, username, identityKeys)) {
                 const directId = pickNumericObjectValue(value, idKeys);
 
+
                 if (directId) return directId;
             }
+
 
             for (const key of [
                 'legacy',
@@ -3770,6 +5378,7 @@ https://x.com/usuario3"></textarea>
                 'node'
             ]) {
                 const nested = value[key];
+
 
                 if (
                     nested &&
@@ -3784,36 +5393,46 @@ https://x.com/usuario3"></textarea>
                         pickNumericObjectValue(nested, idKeys) ||
                         pickNumericObjectValue(value, idKeys);
 
+
                     if (nestedId) return nestedId;
                 }
             }
+
 
             const children = Array.isArray(value)
                 ? value
                 : Object.values(value);
 
+
             for (const child of children) {
                 const found = visit(child, depth + 1);
+
 
                 if (found) return found;
             }
 
+
             return '';
         }
+
 
         return visit(root, 0);
     }
 
+
     function objectHasExactIdentity(object, username, identityKeys) {
         if (!object || typeof object !== 'object') return false;
+
 
         const allowedKeys = new Set(
             identityKeys.map(key => key.toLowerCase())
         );
 
+
         return Object.entries(object).some(([key, value]) => {
             if (!allowedKeys.has(key.toLowerCase())) return false;
             if (typeof value !== 'string') return false;
+
 
             return sameIdentity(
                 normalizeEmbeddedIdentity(value),
@@ -3822,8 +5441,10 @@ https://x.com/usuario3"></textarea>
         });
     }
 
+
     function normalizeEmbeddedIdentity(value) {
         const cleaned = clean(value).replace(/^@/, '');
+
 
         try {
             const url = new URL(cleaned, location.origin);
@@ -3832,65 +5453,77 @@ https://x.com/usuario3"></textarea>
                 .filter(Boolean)[0]
                 ?.replace(/^@/, '');
 
+
             return pathIdentity || cleaned;
         } catch {
             return cleaned;
         }
     }
 
+
     function pickNumericObjectValue(object, keys) {
         if (!object || typeof object !== 'object') return '';
 
+
         const allowedKeys = new Set(keys.map(key => key.toLowerCase()));
+
 
         for (const [key, value] of Object.entries(object)) {
             if (!allowedKeys.has(key.toLowerCase())) continue;
+
 
             if (
                 typeof value === 'number' &&
                 !Number.isSafeInteger(value)
             ) {
-                /*
-                 * Un ID de 64 bits sin comillas pierde precisión al pasar
-                 * por JSON.parse. No se exporta un número redondeado.
-                 */
                 continue;
             }
 
+
             const candidate = clean(value);
+
 
             if (/^\d{5,}$/.test(candidate)) {
                 return candidate;
             }
         }
 
+
         return '';
     }
+
 
     function getEmbeddedTextSources() {
         const scripts = Array.from(
             document.querySelectorAll('script')
         );
 
+
         const sources = scripts
             .map(script => script.textContent || '')
             .filter(textValue => textValue.length > 20);
 
+
         sources.push(getHtml());
+
 
         return sources;
     }
 
+
     /********************************************************************
      * URLS Y TIPOS DE PÁGINA
      ********************************************************************/
+
 
     function detectPlatform() {
         const hostname = location.hostname
             .replace(/^www\./, '')
             .toLowerCase();
 
+
         if (hostname === 'tiktok.com') return 'TikTok';
+
 
         if (
             hostname === 'x.com' ||
@@ -3899,6 +5532,7 @@ https://x.com/usuario3"></textarea>
             return 'Twitter/X';
         }
 
+
         if (
             hostname === 'facebook.com' ||
             hostname === 'm.facebook.com'
@@ -3906,9 +5540,11 @@ https://x.com/usuario3"></textarea>
             return 'Facebook';
         }
 
+
         if (hostname === 'instagram.com') {
             return 'Instagram';
         }
+
 
         if (
             hostname === 'threads.com' ||
@@ -3917,8 +5553,10 @@ https://x.com/usuario3"></textarea>
             return 'Threads';
         }
 
+
         return '';
     }
+
 
     function getUserFromUrl() {
         try {
@@ -3927,23 +5565,28 @@ https://x.com/usuario3"></textarea>
                 .replace(/^www\./, '')
                 .toLowerCase();
 
+
             const segments = decodeURIComponent(url.pathname)
                 .split('/')
                 .filter(Boolean);
+
 
             if (hostname === 'tiktok.com') {
                 const match = url.pathname.match(
                     /^\/@([^/?#]+)/
                 );
 
+
                 return match?.[1] || '';
             }
+
 
             if (
                 hostname === 'x.com' ||
                 hostname === 'twitter.com'
             ) {
                 const first = segments[0] || '';
+
 
                 const reserved = [
                     'home',
@@ -3956,13 +5599,16 @@ https://x.com/usuario3"></textarea>
                     'i'
                 ];
 
+
                 return reserved.includes(first.toLowerCase())
                     ? ''
                     : first.replace(/^@/, '');
             }
 
+
             if (hostname === 'instagram.com') {
                 const first = segments[0] || '';
+
 
                 const reserved = [
                     'p',
@@ -3973,10 +5619,12 @@ https://x.com/usuario3"></textarea>
                     'direct'
                 ];
 
+
                 return reserved.includes(first.toLowerCase())
                     ? ''
                     : first.replace(/^@/, '');
             }
+
 
             if (
                 hostname === 'threads.com' ||
@@ -3986,8 +5634,10 @@ https://x.com/usuario3"></textarea>
                     /^\/@([^/?#]+)/
                 );
 
+
                 return match?.[1] || '';
             }
+
 
             if (
                 hostname === 'facebook.com' ||
@@ -3996,17 +5646,20 @@ https://x.com/usuario3"></textarea>
                 return getFacebookIdentity();
             }
 
+
             return '';
         } catch {
             return '';
         }
     }
 
+
     function getFacebookObjectType() {
         return /^\/groups\//i.test(location.pathname)
             ? 'GRUPO'
             : 'PERFIL';
     }
+
 
     function getFacebookGroupIdFromUrl() {
         try {
@@ -4017,6 +5670,7 @@ https://x.com/usuario3"></textarea>
         }
     }
 
+
     function getFacebookIdentity() {
         try {
             const url = new URL(location.href);
@@ -4024,14 +5678,18 @@ https://x.com/usuario3"></textarea>
                 .split('/')
                 .filter(Boolean);
 
+
             const groupMatch =
                 url.pathname.match(/^\/groups\/([^/?#]+)/i);
+
 
             if (groupMatch?.[1]) {
                 return groupMatch[1];
             }
 
+
             const queryId = url.searchParams.get('id');
+
 
             if (
                 url.pathname.startsWith('/profile.php') &&
@@ -4040,13 +5698,16 @@ https://x.com/usuario3"></textarea>
                 return queryId;
             }
 
+
             if (segments[0]?.toLowerCase() === 'people') {
                 const numericId = [...segments]
                     .reverse()
                     .find(segment => /^\d{5,}$/.test(segment));
 
+
                 return numericId || segments[1] || '';
             }
+
 
             return segments[0] || '';
         } catch {
@@ -4054,24 +5715,30 @@ https://x.com/usuario3"></textarea>
         }
     }
 
+
     function getFacebookProfileUrlName() {
         if (getFacebookObjectType() === 'GRUPO') return '';
+
 
         try {
             const url = new URL(location.href);
             const queryId = url.searchParams.get('id');
 
+
             if (url.pathname.startsWith('/profile.php') && queryId) {
                 return queryId;
             }
+
 
             const segments = decodeURIComponent(url.pathname)
                 .split('/')
                 .filter(Boolean);
 
+
             if (segments[0]?.toLowerCase() === 'people') {
                 return segments[1] || getFacebookIdentity();
             }
+
 
             return getFacebookProfileUsername();
         } catch {
@@ -4079,12 +5746,15 @@ https://x.com/usuario3"></textarea>
         }
     }
 
+
     function getFacebookProfileUsername() {
         if (getFacebookObjectType() === 'GRUPO') {
             return '';
         }
 
+
         const identity = getFacebookIdentity();
+
 
         const reserved = [
             'profile.php',
@@ -4099,6 +5769,7 @@ https://x.com/usuario3"></textarea>
             'login'
         ];
 
+
         if (
             !identity ||
             reserved.includes(identity.toLowerCase())
@@ -4106,19 +5777,23 @@ https://x.com/usuario3"></textarea>
             return '';
         }
 
+
         return identity;
     }
+
 
     function isXAboutPage() {
         return /\/about\/?$/i.test(location.pathname);
     }
 
+
     function isFacebookAboutPage() {
         try {
             const url = new URL(location.href);
 
+
             return (
-                /\/about\/?$/i.test(url.pathname) ||
+                /\/about(?:_profile_transparency)?\/?$/i.test(url.pathname) ||
                 /^about/i.test(url.searchParams.get('sk') || '')
             );
         } catch {
@@ -4126,102 +5801,131 @@ https://x.com/usuario3"></textarea>
         }
     }
 
+
     function facebookAboutUrl() {
         try {
             const url = new URL(location.href);
+
 
             if (getFacebookObjectType() === 'GRUPO') {
                 const match =
                     url.pathname.match(/^\/groups\/([^/?#]+)/i);
 
+
                 if (!match?.[1]) return '';
+
 
                 return `${url.origin}/groups/${match[1]}/about`;
             }
 
+
             if (url.pathname.startsWith('/profile.php')) {
                 const id = url.searchParams.get('id');
 
+
                 if (!id) return '';
 
-                return `${url.origin}/profile.php?id=${encodeURIComponent(id)}&sk=about`;
+
+                return `${url.origin}/profile.php?id=${encodeURIComponent(id)}&sk=about_profile_transparency`;
             }
+
 
             const peopleMatch = decodeURIComponent(url.pathname).match(
                 /^\/people\/[^/]+\/(\d{5,})/i
             );
 
+
             if (peopleMatch?.[1]) {
-                return `${url.origin}/profile.php?id=${encodeURIComponent(peopleMatch[1])}&sk=about`;
+                return `${url.origin}/profile.php?id=${encodeURIComponent(peopleMatch[1])}&sk=about_profile_transparency`;
             }
+
 
             const username = getFacebookProfileUsername();
 
+
             if (!username) return '';
 
-            return `${url.origin}/${encodeURIComponent(username)}/about`;
+
+            return `${url.origin}/${encodeURIComponent(username)}/about_profile_transparency`;
         } catch {
             return '';
         }
     }
 
+
     function canonicalProfileUrl() {
         try {
             const url = new URL(location.href);
 
+
             url.hash = '';
+
 
             if (PLATFORM === 'Twitter/X') {
                 const username = getUserFromUrl();
+
 
                 return username
                     ? `https://x.com/${encodeURIComponent(username)}`
                     : url.href;
             }
 
+
             if (PLATFORM === 'Instagram') {
                 const username = getUserFromUrl();
+
 
                 return username
                     ? `https://www.instagram.com/${encodeURIComponent(username)}/`
                     : url.href;
             }
 
+
             if (PLATFORM === 'TikTok') {
                 const username = getUserFromUrl();
+
 
                 return username
                     ? `https://www.tiktok.com/@${encodeURIComponent(username)}`
                     : url.href;
             }
 
+
             if (PLATFORM === 'Threads') {
                 const username = getUserFromUrl();
+
 
                 return username
                     ? `https://www.threads.com/@${encodeURIComponent(username)}`
                     : url.href;
             }
 
+
             if (PLATFORM === 'Facebook') {
                 if (getFacebookObjectType() === 'GRUPO') {
                     const identity = getFacebookIdentity();
 
+
                     return `${url.origin}/groups/${identity}`;
                 }
 
+
                 const id = url.searchParams.get('id');
+
 
                 if (url.pathname.startsWith('/profile.php') && id) {
                     return `${url.origin}/profile.php?id=${encodeURIComponent(id)}`;
                 }
 
+
                 const username = getFacebookProfileUsername();
+
 
                 return username
                     ? `${url.origin}/${encodeURIComponent(username)}`
                     : url.href;
             }
+
 
             return url.href;
         } catch {
@@ -4229,86 +5933,110 @@ https://x.com/usuario3"></textarea>
         }
     }
 
+
     function toProfileUrl(input) {
         let value = clean(input);
 
+
         if (!value) return '';
+
 
         if (/^https?:\/\//i.test(value)) {
             return value;
         }
 
+
         value = value.replace(/^@/, '');
+
 
         switch (PLATFORM) {
             case 'TikTok':
                 return `https://www.tiktok.com/@${encodeURIComponent(value)}`;
 
+
             case 'Twitter/X':
                 return `https://x.com/${encodeURIComponent(value)}`;
+
 
             case 'Instagram':
                 return `https://www.instagram.com/${encodeURIComponent(value)}/`;
 
+
             case 'Threads':
                 return `https://www.threads.com/@${encodeURIComponent(value)}`;
+
 
             case 'Facebook':
                 if (/^\d{5,}$/.test(value)) {
                     return `https://www.facebook.com/profile.php?id=${encodeURIComponent(value)}`;
                 }
 
+
                 return `https://www.facebook.com/${encodeURIComponent(value)}`;
+
 
             default:
                 return '';
         }
     }
 
+
     function sameProfileTarget(targetUrl, currentUrl) {
         const target = extractTargetIdentity(targetUrl);
         const current = extractTargetIdentity(currentUrl);
 
+
         if (!target || !current) return false;
+
 
         return sameIdentity(target, current);
     }
+
 
     function extractTargetIdentity(rawUrl) {
         try {
             const url = new URL(rawUrl, location.origin);
             const path = decodeURIComponent(url.pathname);
 
+
             if (PLATFORM === 'TikTok') {
                 return path.match(/^\/@([^/?#]+)/)?.[1] || '';
             }
+
 
             if (PLATFORM === 'Twitter/X') {
                 return path.split('/').filter(Boolean)[0] || '';
             }
 
+
             if (PLATFORM === 'Instagram') {
                 return path.split('/').filter(Boolean)[0] || '';
             }
+
 
             if (PLATFORM === 'Threads') {
                 return path.match(/^\/@([^/?#]+)/)?.[1] || '';
             }
 
+
             if (PLATFORM === 'Facebook') {
                 const group =
                     path.match(/^\/groups\/([^/?#]+)/i);
+
 
                 if (group?.[1]) {
                     return `group:${group[1]}`;
                 }
 
+
                 if (path.startsWith('/profile.php')) {
                     return `profile:${url.searchParams.get('id') || ''}`;
                 }
 
+
                 return `profile:${path.split('/').filter(Boolean)[0] || ''}`;
             }
+
 
             return '';
         } catch {
@@ -4316,52 +6044,77 @@ https://x.com/usuario3"></textarea>
         }
     }
 
+
     function sameIdentity(first, second) {
         return normalizeText(first) === normalizeText(second);
     }
 
+
     /********************************************************************
      * DETECCIÓN DE ERRORES DE PLATAFORMA
      ********************************************************************/
+
 
     function detectBlock() {
         const content = normalizeText(
             `${document.title}\n${getBodyText()}`
         );
 
+
         return /temporarily blocked|too many requests|rate limit|try again later|unusual traffic|captcha|please wait a few minutes|demasiadas solicitudes|intentalo de nuevo mas tarde|actividad inusual|verifica que eres tu|verificacion de seguridad|hemos limitado la frecuencia/.test(content);
     }
+
 
     function detectNotFound() {
         const content = normalizeText(
             `${document.title}\n${getBodyText()}`
         );
 
+
         switch (PLATFORM) {
-            case 'TikTok':
-                return /couldn.t find this account|account doesn.t exist|account not found|usuario no encontrado|cuenta no encontrada/.test(content);
+            case 'TikTok': {
+                if (document.querySelector('[data-e2e="error-page"]')) {
+                    return true;
+                }
+
+
+                const bundle = findTikTokUserBundle(getUserFromUrl() || '');
+                if (bundle.notFound) {
+                    return true;
+                }
+
+
+                return /couldn.t find this account|account doesn.t exist|account not found|usuario no encontrado|cuenta no encontrada|no se ha podido encontrar esta cuenta|no se pudo encontrar esta cuenta|esta cuenta no existe|cuenta suspendida|this account was banned|account banned/.test(content);
+            }
+
 
             case 'Twitter/X':
                 return /this account doesn.t exist|try searching for another|esta cuenta no existe|account suspended|cuenta suspendida/.test(content);
 
+
             case 'Instagram':
                 return /sorry, this page isn.t available|esta pagina no esta disponible|user not found|usuario no encontrado/.test(content);
+
 
             case 'Facebook':
                 return /this content isn.t available|this page isn.t available|esta pagina no esta disponible|este contenido no esta disponible|perfil no disponible/.test(content);
 
+
             case 'Threads':
                 return /this profile isn.t available|profile not found|perfil no disponible|esta pagina no esta disponible/.test(content);
+
 
             default:
                 return false;
         }
     }
 
+
     function buildUnavailableRow(username, exists, observations) {
         const missingValue = normalizeText(exists) === 'no'
             ? '-'
             : 'N/D';
+
 
         return {
             USUARIO: username || missingValue,
@@ -4394,16 +6147,20 @@ https://x.com/usuario3"></textarea>
         };
     }
 
+
     /********************************************************************
      * HELPERS DE TEXTO Y DOM
      ********************************************************************/
+
 
     function $(selector) {
         return document.querySelector(selector);
     }
 
+
     function text(selector) {
         const element = document.querySelector(selector);
+
 
         return clean(
             element?.innerText ||
@@ -4412,8 +6169,10 @@ https://x.com/usuario3"></textarea>
         );
     }
 
+
     function metaContent(selector) {
         const element = document.querySelector(selector);
+
 
         return clean(
             element?.getAttribute('content') ||
@@ -4421,13 +6180,16 @@ https://x.com/usuario3"></textarea>
         );
     }
 
+
     function getBodyText() {
         return document.body?.innerText || '';
     }
 
+
     function getHtml() {
         return document.documentElement?.innerHTML || '';
     }
+
 
     function clean(value) {
         return String(value ?? '')
@@ -4436,6 +6198,7 @@ https://x.com/usuario3"></textarea>
             .trim();
     }
 
+
     function normalizeText(value) {
         return clean(value)
             .normalize('NFD')
@@ -4443,38 +6206,47 @@ https://x.com/usuario3"></textarea>
             .toLowerCase();
     }
 
+
     function rxFirst(source, patterns) {
         const textValue = String(source || '');
 
+
         for (const pattern of patterns) {
             const match = textValue.match(pattern);
+
 
             if (match?.[1]) {
                 return decodeHtml(match[1]);
             }
         }
 
+
         return '';
     }
+
 
     function extractMetric(source, patterns) {
         return clean(rxFirst(source, patterns)) || 'N/D';
     }
 
+
     function extractFollowingMetric(source) {
         const value = rxFirst(source, [
-            /(?:^|[,\n\r])\s*([\d][\d.,\s]*(?:K|M|B|mil|millones)?)\s+(?:Following|Siguiendo|Seguidos|Seguidas)\b/i,
+            /(?:^|[\s•·|,\n\r])([\d][\d.,\s]*(?:K|M|B|mil|millones)?)\s+(?:Following|Siguiendo|Seguidos|Seguidas)\b/i,
             /(?:Following|Siguiendo|Seguidos|Seguidas)\s*:?\s*([\d][\d.,\s]*(?:K|M|B|mil|millones)?)/i
         ]);
 
+
         return clean(value);
     }
+
 
     function extractMetricFromLines(source, patterns, exclusions = []) {
         const lines = String(source || '')
             .split(/\r?\n/)
             .map(clean)
             .filter(Boolean);
+
 
         for (const line of lines) {
             if (
@@ -4483,8 +6255,10 @@ https://x.com/usuario3"></textarea>
                 continue;
             }
 
+
             for (const pattern of patterns) {
                 const match = line.match(pattern);
+
 
                 if (match?.[1]) {
                     return clean(match[1]);
@@ -4492,8 +6266,10 @@ https://x.com/usuario3"></textarea>
             }
         }
 
+
         return 'N/D';
     }
+
 
     function extractLabeledValue(source, labels) {
         const lines = String(source || '')
@@ -4501,23 +6277,29 @@ https://x.com/usuario3"></textarea>
             .map(clean)
             .filter(Boolean);
 
+
         for (let index = 0; index < lines.length; index += 1) {
             const line = lines[index];
+
 
             for (const label of labels) {
                 const match = line.match(label);
 
+
                 if (!match) continue;
+
 
                 if (match[1]) {
                     return clean(match[1]);
                 }
+
 
                 const trailing = clean(
                     line
                         .slice(match.index + match[0].length)
                         .replace(/^[:\-–—\s]+/, '')
                 );
+
 
                 if (
                     trailing &&
@@ -4527,6 +6309,7 @@ https://x.com/usuario3"></textarea>
                     return trailing;
                 }
 
+
                 for (
                     let nextIndex = index + 1;
                     nextIndex <= index + 3 &&
@@ -4534,6 +6317,7 @@ https://x.com/usuario3"></textarea>
                     nextIndex += 1
                 ) {
                     const candidate = lines[nextIndex];
+
 
                     if (
                         candidate &&
@@ -4546,8 +6330,10 @@ https://x.com/usuario3"></textarea>
             }
         }
 
+
         return '';
     }
+
 
     function extractCountAroundLabel(source, labels) {
         const lines = String(source || '')
@@ -4555,33 +6341,42 @@ https://x.com/usuario3"></textarea>
             .map(clean)
             .filter(Boolean);
 
+
         const directText = clean(source);
+
 
         for (const label of labels) {
             const normalizedLabel = label.source;
+
 
             const afterPattern = new RegExp(
                 `${normalizedLabel}\\s*:?\\s*(\\d{1,5})`,
                 'i'
             );
 
+
             const afterMatch = directText.match(afterPattern);
+
 
             if (afterMatch?.[1]) {
                 return afterMatch[1];
             }
+
 
             const beforePattern = new RegExp(
                 `(\\d{1,5})\\s*${normalizedLabel}`,
                 'i'
             );
 
+
             const beforeMatch = directText.match(beforePattern);
+
 
             if (beforeMatch?.[1]) {
                 return beforeMatch[1];
             }
         }
+
 
         for (let index = 0; index < lines.length; index += 1) {
             if (
@@ -4590,9 +6385,11 @@ https://x.com/usuario3"></textarea>
                 continue;
             }
 
+
             const nearby = lines
                 .slice(index, index + 5)
                 .join(' ');
+
 
             if (
                 /no former usernames|ningun nombre de usuario anterior|ningún nombre de usuario anterior/i.test(nearby)
@@ -4600,15 +6397,19 @@ https://x.com/usuario3"></textarea>
                 return '0';
             }
 
+
             const match = nearby.match(/\b(\d{1,5})\b/);
+
 
             if (match?.[1]) {
                 return match[1];
             }
         }
 
+
         return '';
     }
+
 
     function isUiNoise(value) {
         return /^(close|cerrar|back|volver|more|más|mas|learn more|más información|mas informacion|about this account|acerca de esta cuenta)$/i.test(
@@ -4616,10 +6417,13 @@ https://x.com/usuario3"></textarea>
         );
     }
 
+
     function cleanAccountLocation(value) {
         const cleaned = clean(value);
 
+
         if (!cleaned) return 'N/D';
+
 
         return cleaned
             .replace(
@@ -4629,6 +6433,7 @@ https://x.com/usuario3"></textarea>
             .trim() || 'N/D';
     }
 
+
     function findClickableByText(
         labels,
         root = document,
@@ -4636,16 +6441,20 @@ https://x.com/usuario3"></textarea>
     ) {
         const normalizedLabels = labels.map(normalizeText);
 
+
         const elements = Array.from(
             root.querySelectorAll(
                 'button,[role="button"],[role="menuitem"],a,div[tabindex="0"]'
             )
         );
 
+
         let partialMatch = null;
+
 
         for (const element of elements) {
             if (!isVisible(element)) continue;
+
 
             const value = clean(
                 element.innerText ||
@@ -4653,13 +6462,17 @@ https://x.com/usuario3"></textarea>
                 ''
             );
 
+
             if (!value || value.length > 140) continue;
 
+
             const normalizedValue = normalizeText(value);
+
 
             if (normalizedLabels.includes(normalizedValue)) {
                 return element;
             }
+
 
             if (
                 !exactOnly &&
@@ -4672,11 +6485,14 @@ https://x.com/usuario3"></textarea>
             }
         }
 
+
         return partialMatch;
     }
 
+
     function safeClick(element) {
         if (!element) return false;
+
 
         try {
             element.scrollIntoView({
@@ -4685,19 +6501,17 @@ https://x.com/usuario3"></textarea>
             });
         } catch {}
 
+
         try {
             element.focus();
         } catch {}
 
-        /*
-         * Firefox + Violentmonkey funciona de forma más fiable con el
-         * click nativo. Los eventos manuales quedan como alternativas y
-         * no pueden impedir que se pruebe el resto de métodos.
-         */
+
         try {
             element.click();
             return true;
         } catch {}
+
 
         try {
             element.dispatchEvent(
@@ -4708,6 +6522,7 @@ https://x.com/usuario3"></textarea>
                 })
             );
 
+
             element.dispatchEvent(
                 new MouseEvent('mouseup', {
                     bubbles: true,
@@ -4715,6 +6530,7 @@ https://x.com/usuario3"></textarea>
                     view: window
                 })
             );
+
 
             element.dispatchEvent(
                 new MouseEvent('click', {
@@ -4724,8 +6540,10 @@ https://x.com/usuario3"></textarea>
                 })
             );
 
+
             return true;
         } catch {}
+
 
         try {
             element.dispatchEvent(
@@ -4737,6 +6555,7 @@ https://x.com/usuario3"></textarea>
                 })
             );
 
+
             element.dispatchEvent(
                 new KeyboardEvent('keyup', {
                     key: 'Enter',
@@ -4746,17 +6565,22 @@ https://x.com/usuario3"></textarea>
                 })
             );
 
+
             return true;
         } catch {}
+
 
         return false;
     }
 
+
     function isVisible(element) {
         if (!element) return false;
 
+
         const style = getComputedStyle(element);
         const rect = element.getBoundingClientRect();
+
 
         return (
             style.display !== 'none' &&
@@ -4767,33 +6591,39 @@ https://x.com/usuario3"></textarea>
         );
     }
 
+
     async function waitFor(callback, timeout = 5000, interval = 200) {
         const start = Date.now();
+
 
         while (Date.now() - start < timeout) {
             try {
                 const result = callback();
 
+
                 if (result) {
                     return result;
                 }
-            } catch {
-                // Se vuelve a intentar hasta agotar el tiempo.
-            }
+            } catch {}
+
 
             await sleep(interval);
         }
 
+
         return null;
     }
+
 
     function waitForDom(callback, timeout = 8000) {
         return new Promise(resolve => {
             let finished = false;
             let observer = null;
 
+
             const finish = value => {
                 if (finished) return;
+
 
                 finished = true;
                 observer?.disconnect();
@@ -4801,22 +6631,24 @@ https://x.com/usuario3"></textarea>
                 resolve(value || null);
             };
 
+
             const check = () => {
                 try {
                     const result = callback();
 
+
                     if (result) {
                         finish(result);
                     }
-                } catch {
-                    // El DOM puede cambiar mientras se recorre.
-                }
+                } catch {}
             };
+
 
             const timer = setTimeout(() => {
                 check();
                 finish(null);
             }, timeout);
+
 
             observer = new MutationObserver(check);
             observer.observe(document.documentElement, {
@@ -4830,32 +6662,66 @@ https://x.com/usuario3"></textarea>
                 ]
             });
 
+
             check();
         });
     }
 
+
     async function waitForPage() {
         const start = Date.now();
 
-        while (Date.now() - start < 15000) {
-            if (
-                document.body &&
-                getBodyText().length > 60
-            ) {
-                return;
-            }
 
-            await sleep(400);
+        while (Date.now() - start < 15000) {
+            if (document.body && getBodyText().length > 60) {
+                break;
+            }
+            await sleep(350);
         }
+
+
+        // Espera adicional específica de plataforma para asegurar hidratación del perfil
+        await waitFor(() => {
+            if (detectNotFound() || detectBlock()) return true;
+
+
+            switch (PLATFORM) {
+                case 'TikTok':
+                    return Boolean(
+                        document.querySelector('[data-e2e="user-title"]') ||
+                        document.querySelector('[data-e2e="followers-count"]') ||
+                        document.querySelector('[data-e2e="error-page"]')
+                    );
+                case 'Facebook':
+                    return Boolean(
+                        Array.from(document.querySelectorAll('h1')).find(isVisible)
+                    );
+                case 'Twitter/X':
+                    return Boolean(
+                        document.querySelector('[data-testid="UserName"]') ||
+                        isXAboutPage()
+                    );
+                case 'Instagram':
+                    return Boolean(
+                        document.querySelector('main header') ||
+                        document.querySelector('meta[property="og:description"]')
+                    );
+                default:
+                    return true;
+            }
+        }, 5000, 250);
     }
+
 
     function parseJsonScript(id) {
         try {
             const script = document.getElementById(id);
 
+
             if (!script?.textContent) {
                 return null;
             }
+
 
             return JSON.parse(script.textContent);
         } catch {
@@ -4863,10 +6729,12 @@ https://x.com/usuario3"></textarea>
         }
     }
 
+
     function walkObject(root, visitor) {
         const visited = new WeakSet();
         let visitedCount = 0;
         const maxObjects = 30000;
+
 
         function walk(value, depth) {
             if (
@@ -4878,11 +6746,14 @@ https://x.com/usuario3"></textarea>
                 return;
             }
 
+
             if (visited.has(value)) return;
+
 
             visited.add(value);
             visitedCount += 1;
             visitor(value);
+
 
             if (Array.isArray(value)) {
                 for (const item of value) {
@@ -4895,13 +6766,16 @@ https://x.com/usuario3"></textarea>
             }
         }
 
+
         walk(root, 0);
     }
+
 
     function pick(object, keys) {
         if (!object || typeof object !== 'object') {
             return '';
         }
+
 
         for (const key of keys) {
             if (
@@ -4913,16 +6787,20 @@ https://x.com/usuario3"></textarea>
             }
         }
 
+
         return '';
     }
 
+
     function mergeRows(...objects) {
         const output = {};
+
 
         for (const object of objects) {
             if (!object || typeof object !== 'object') {
                 continue;
             }
+
 
             for (const [key, value] of Object.entries(object)) {
                 if (key === 'OBSERVACIONES') {
@@ -4931,8 +6809,10 @@ https://x.com/usuario3"></textarea>
                         value
                     );
 
+
                     continue;
                 }
+
 
                 if (
                     isUsefulValue(value) ||
@@ -4943,11 +6823,14 @@ https://x.com/usuario3"></textarea>
             }
         }
 
+
         return output;
     }
 
+
     function isUsefulValue(value) {
         const cleaned = clean(value);
+
 
         return (
             cleaned !== '' &&
@@ -4958,11 +6841,14 @@ https://x.com/usuario3"></textarea>
         );
     }
 
+
     function joinNotes(...notes) {
         const unique = [];
 
+
         for (const note of notes) {
             const cleaned = clean(note);
+
 
             if (
                 !cleaned ||
@@ -4972,14 +6858,18 @@ https://x.com/usuario3"></textarea>
                 continue;
             }
 
+
             unique.push(cleaned);
         }
+
 
         return unique.join(' ');
     }
 
+
     function rowKey(row) {
         const id = clean(row['ID interno']);
+
 
         if (isUsefulValue(id)) {
             return [
@@ -4989,6 +6879,7 @@ https://x.com/usuario3"></textarea>
             ].join('::');
         }
 
+
         return [
             normalizeText(row.PLATAFORMA || PLATFORM),
             normalizeText(row['TIPO DE OBJETO'] || ''),
@@ -4996,23 +6887,30 @@ https://x.com/usuario3"></textarea>
         ].join('::');
     }
 
+
     function setStatus(message) {
         const element = $('#falconai-status');
+
 
         if (element) {
             element.textContent = message;
         }
 
+
         console.log('[Roomba Scraper]', message);
     }
+
 
     function updatePanelCounts() {
         const rows = getRows();
         const queue = getQueue();
 
+
         const element = $('#falconai-small');
 
+
         if (!element) return;
+
 
         element.textContent =
             `Filas: ${rows.length} · ` +
@@ -5022,11 +6920,13 @@ https://x.com/usuario3"></textarea>
             `Los datos no visibles se registran como N/D; no se infieren ni se sortean verificaciones.`;
     }
 
+
     function decodeHtml(value) {
         const textarea = document.createElement('textarea');
         textarea.innerHTML = String(value || '');
         return textarea.value;
     }
+
 
     function escapeHtml(value) {
         return String(value ?? '')
@@ -5036,16 +6936,19 @@ https://x.com/usuario3"></textarea>
             .replace(/"/g, '&quot;');
     }
 
+
     function escapeRegExp(value) {
         return String(value)
             .replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     }
+
 
     function sleep(milliseconds) {
         return new Promise(resolve => {
             setTimeout(resolve, milliseconds);
         });
     }
+
 
     function randomInt(minimum, maximum) {
         return Math.floor(
